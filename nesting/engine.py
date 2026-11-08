@@ -176,6 +176,10 @@ class _Context:
                 continue
             w, h = mx - bx, my - by
             cw, ch = int(math.ceil(w / r - 1e-9)) + 2, int(math.ceil(h / r - 1e-9)) + 2
+            # Bigger than every sheet grid: it can never be placed, so do not draw it
+            # (a drawing read in the wrong units can be tens of metres: GBs of grid).
+            if not any(b is not None and ch <= b.ny and cw <= b.nx for b in self.all_bases()):
+                continue
             # draw with a one-cell border (shape origin at cell 1,1), then grow by one cell
             raw = _raster(norm, -r, -r, r, cw, ch, holes=self.holes)
             ker = binary_dilation(raw, structure=np.ones((3, 3), bool))
@@ -185,6 +189,9 @@ class _Context:
                               ch, cw, ncells))
         self._shapes[pid] = out
         return out
+
+    def all_bases(self) -> list["_SheetBase | None"]:
+        return [self.base(si) for si in range(len(self.specs))]
 
     def base(self, si: int) -> "_SheetBase | None":
         if si not in self._bases:

@@ -197,10 +197,12 @@ def import_files(s: Session, job: Job, uploads: list) -> dict:
 # ---------- defaults ----------
 
 def default_cut_tool(s: Session) -> Tool | None:
-    """Smallest flat bit; any bit if there is no flat one."""
+    """Same rule as the web UI: the 6 mm flat bit, else the smallest flat bit,
+    else any bit."""
     tools = list(s.scalars(select(Tool).order_by(Tool.diameter_mm, Tool.id)))
     flat = [t for t in tools if t.kind == "flat"]
-    return (flat or tools or [None])[0]
+    six = [t for t in flat if abs(t.diameter_mm - 6.0) < 1e-9]
+    return (six or flat or tools or [None])[0]
 
 
 def default_gap(s: Session, machine: Machine | None) -> float:
@@ -306,6 +308,8 @@ def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
     given = body.model_dump(exclude_none=True)
     opts.update(given)
     opts["time_limit_s"] = max(0.0, min(float(opts["time_limit_s"]), MAX_TIME_LIMIT))
+    if not all(math.isfinite(float(r)) for r in (opts["rotations"] or [])):
+        raise UserError("Rotations must be numbers of degrees")   # JSON NaN/Infinity would crash the nester
     rots = [float(r) % 360.0 for r in (opts["rotations"] or [0.0])]
     opts["rotations"] = list(dict.fromkeys(rots))       # drop repeats, keep order
 
@@ -314,6 +318,18 @@ def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
     parts = job_parts(s, job.id)
     if not any(p.qty > 0 for p in parts):
         raise UserError("Add parts (quantity above 0) before nesting")
+
+    # A sheet bigger than the machine bed cannot be cut: nest on the part of
+    # it that fits the bed (either way round) and keep the rest whole.
+    mach = s.get(Machine, job.machine_id) if job.machine_id else None
+    if mach is not None and mach.bed_w and mach.bed_h:
+        sw, sh = float(opts["sheet_w"]), float(opts["sheet_h"])
+        big, small = max(mach.bed_w, mach.bed_h), min(mach.bed_w, mach.bed_h)
+        if not ((sw <= mach.bed_w and sh <= mach.bed_h) or (sw <= mach.bed_h and sh <= mach.bed_w)):
+            if sw >= sh:
+                opts["sheet_w"], opts["sheet_h"] = min(sw, big), min(sh, small)
+            else:
+                opts["sheet_w"], opts["sheet_h"] = min(sw, small), min(sh, big)
 
     margin = float(opts["margin_mm"])
     sheets: list[SheetSpec] = []
@@ -391,20 +407,42 @@ def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
         warnings.append(f"{len(missing)} part(s) were deleted after nesting and are left out: nest again")
         for sh in result.sheets:
             sh.placements = [pl for pl in sh.placements if pl.part_id in parts]
+    # parts added or quantities changed after nesting are not in these files
+    nested: dict[str, int] = {}
+    for sh in result.sheets:
+        for pl in sh.placements:
+            nested[pl.part_id] = nested.get(pl.part_id, 0) + 1
+    changed = [p.name for p in parts.values()
+               if nested.get(p.id, 0) + int(result.unplaced.get(p.id, 0)) != p.qty]
+    if changed:
+        warnings.append(f"Parts or quantities changed after nesting ({', '.join(changed[:5])}"
+                        f"{', ...' if len(changed) > 5 else ''}): these files use the old layout, nest again")
 
     folder = job_dir(data_dir, job.id)
     os.makedirs(folder, exist_ok=True)
     base = slug(job.name, f"job{job.id}")
-    clear_exports(data_dir, job, body.target)
     records: list[dict] = []
 
+    gap = float(json.loads(run.settings_json).get("gap_mm", 0) or 0)
     if body.target == "ncstudio":
-        records, w = _export_ncstudio(s, job, result, parts, body, folder, base)
+        records, w = _export_ncstudio(s, job, result, parts, body, folder, base, gap)
     else:
+        # the beam runs kerf/2 outside each part and burns kerf/2 either side of that line
+        if (body.kerf_mm or 0.0) > gap + 1e-6:
+            raise UserError(f"The parts were nested {gap:g} mm apart, less than the {body.kerf_mm:g} mm kerf: "
+                            f"nest again with a gap of at least {body.kerf_mm:g} mm, or lower the kerf")
         records, w = _export_ruida(result, parts, body, folder, base)
     warnings += w
 
-    job.exports_json = json.dumps(exports_of(job) + records)
+    # Only now drop the earlier files of this target: a refused export (bad gap, no
+    # material...) must not delete files the job still lists. Same names were overwritten.
+    new_names = {r["name"] for r in records}
+    for rec in exports_of(job):
+        if rec.get("target") == body.target and rec["name"] not in new_names and is_safe_name(rec["name"]):
+            old = os.path.join(folder, rec["name"])
+            if os.path.isfile(old):
+                os.remove(old)
+    job.exports_json = json.dumps([r for r in exports_of(job) if r.get("target") != body.target] + records)
     if job.status in ("draft", "nested", "exported"):
         job.status = "exported"
     s.commit()
@@ -412,7 +450,7 @@ def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
 
 
 def _export_ncstudio(s: Session, job: Job, result: NestResult, parts: dict[str, Part], body,
-                     folder: str, base: str) -> tuple[list[dict], list[str]]:
+                     folder: str, base: str, gap_mm: float | None = None) -> tuple[list[dict], list[str]]:
     from cam.ncstudio import write_ncstudio
     from cam.toolpaths import CamSettings, sheet_toolpaths
 
@@ -427,6 +465,17 @@ def _export_ncstudio(s: Session, job: Job, result: NestResult, parts: dict[str, 
         cut_row = default_cut_tool(s)
         if cut_row is None:
             raise UserError("Add a tool in Settings first")
+    # Profiles cut right through the sheet; a V-bit only cuts with its short cone and
+    # its offset (diameter / 2) is wrong at every depth but one.
+    if cut_row.kind == "vbit":
+        raise UserError(f"The {cut_row.name} cannot cut parts out: pick a flat bit as the cut tool "
+                        f"(a V-bit can be the mark tool)")
+    # Parts closer together than the bit is wide would be cut into by the
+    # neighbour's outside path, so refuse instead of writing unsafe G-code.
+    if gap_mm is not None and gap_mm + 1e-6 < cut_row.diameter_mm + 0.5:
+        raise UserError(f"The parts were nested {gap_mm:g} mm apart but the {cut_row.name} is "
+                        f"{cut_row.diameter_mm:g} mm wide: nest again with a gap of at least "
+                        f"{cut_row.diameter_mm + 1:g} mm, or pick a thinner bit")
     mark_row = None
     if body.mark_tool_id is not None:
         mark_row = s.get(Tool, body.mark_tool_id)

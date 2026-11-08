@@ -269,3 +269,32 @@ def test_sample_files_import(name, count):
     rep = import_file(path.read_bytes(), name)
     assert len(rep.parts) == count
     assert all(p.shape.is_valid and p.area > 100 for p in rep.parts)
+
+
+def test_many_separate_shapes_import_fast():
+    # ring grouping used to compare every ring with every bigger ring (O(n^2) in Python):
+    # 3000 circles took ~13 s. Only rings whose boxes touch are compared now.
+    import time
+
+    def build(msp, _doc):
+        for i in range(2500):
+            msp.add_circle(((i % 50) * 20, (i // 50) * 20), 5)
+            if i % 10 == 0:
+                msp.add_circle(((i % 50) * 20, (i // 50) * 20), 2)   # a hole in every 10th disc
+    t0 = time.perf_counter()
+    rep = import_file(dxf_bytes(build), "discs.dxf")
+    assert len(rep.parts) == 2500
+    assert sum(len(p.shape.interiors) for p in rep.parts) == 250
+    assert time.perf_counter() - t0 < 6.0
+
+
+def test_mark_sticking_out_of_its_part_is_cut_back():
+    # the nester only knows the part outline; a mark past it would be engraved across a neighbour
+    data = svg('<rect x="10" y="10" width="50" height="50" fill="#000"/>'
+               '<path d="M20 30 L100 30" stroke="#000" fill="none"/>')
+    rep = import_file(data, "m.svg")
+    part = rep.parts[0]
+    assert len(part.marks) == 1
+    assert part.shape.buffer(1e-6).covers(part.marks[0])
+    assert part.marks[0].length == pytest.approx(40, abs=0.01)
+    assert any("cut back" in w for w in rep.warnings)

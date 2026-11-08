@@ -147,7 +147,7 @@ def test_create_job_and_list(client):
     assert j["status"] == "draft" and j["parts"] == [] and j["nest"] is None and j["exports"] == []
     assert j["material"]["name"] == "Acrylic 3 mm" and j["machine"]["kind"] == "cnc"
     # default gap for cnc = smallest flat bit (3 mm) + 1
-    assert j["settings"]["gap_mm"] == 4 and j["settings"]["sheet_w"] == 2440
+    assert j["settings"]["gap_mm"] == 7 and j["settings"]["sheet_w"] == 2440
     new_job(client, "Second")
     rows = client.get("/api/jobs").json()
     assert [r["name"] for r in rows] == ["Second", "Shop sign"]
@@ -215,7 +215,7 @@ def test_full_flow(client):
     parts = upload(client, jid)["parts"]
     client.patch(f"/api/jobs/{jid}/parts/{parts[0]['id']}", json={"qty": 2})
 
-    r = client.post(f"/api/jobs/{jid}/nest", json={**FAST, "time_limit_s": 999})
+    r = client.post(f"/api/jobs/{jid}/nest", json={**FAST, "time_limit_s": 999, "gap_mm": 7})
     assert r.status_code == 200, r.text
     nest = r.json()
     assert set(nest) == {"sheets", "unplaced", "utilisation", "sheets_used", "attempts", "elapsed_s", "cost"}
@@ -237,6 +237,10 @@ def test_full_flow(client):
 
     # CNC G-code
     tools = client.get("/api/tools").json()
+    # a bit wider than the nest gap would cut into the neighbour part: refused
+    wide = client.post("/api/tools", json={"name": "10 mm flat", "diameter_mm": 10, "kind": "flat"}).json()
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": wide["id"]})
+    assert r.status_code == 400 and "nest again" in r.json()["detail"]
     cut = by_name(tools, "6 mm flat 2-flute")
     vbit = by_name(tools, "60° V-bit")
     r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": cut["id"],
@@ -445,3 +449,66 @@ def test_relief_bad_input(client):
     r = client.post("/api/relief", files={"image": ("x.png", b"x", "image/png")},
                     data={"width_mm": "200", "material_mm": "18", "styles": "not json"})
     assert r.status_code == 400 and "JSON" in r.json()["detail"]
+
+
+def test_nest_rejects_non_finite_rotations(client):
+    jid = new_job(client)["id"]
+    upload(client, jid)
+    for raw in ('{"rotations": [NaN]}', '{"rotations": [Infinity]}'):
+        r = client.post(f"/api/jobs/{jid}/nest", content=raw, headers={"content-type": "application/json"})
+        assert r.status_code == 400, r.text
+
+
+def test_export_warns_when_parts_changed_after_nest(client):
+    jid = new_job(client)["id"]
+    up = upload(client, jid)
+    assert client.post(f"/api/jobs/{jid}/nest", json={**FAST, "gap_mm": 7}).status_code == 200
+    tid = by_name(client.get("/api/tools").json(), "6 mm flat 2-flute")["id"]
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": tid})
+    assert not any("changed after nesting" in w for w in r.json()["warnings"])
+    client.patch(f"/api/jobs/{jid}/parts/{up['parts'][0]['id']}", json={"qty": 3})
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": tid})
+    assert r.status_code == 200
+    assert any("changed after nesting" in w for w in r.json()["warnings"])
+
+
+def test_refused_export_keeps_earlier_files_and_kerf_guard(client):
+    jid = new_job(client)["id"]
+    upload(client, jid)
+    assert client.post(f"/api/jobs/{jid}/nest", json={**FAST, "gap_mm": 4}).status_code == 200
+    tid = by_name(client.get("/api/tools").json(), "3 mm flat")["id"]
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": tid})
+    assert r.status_code == 200, r.text
+    files = r.json()["files"]
+    wide = by_name(client.get("/api/tools").json(), "6 mm flat 2-flute")["id"]
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": wide})
+    assert r.status_code == 400
+    for f in files:                       # still listed and still there
+        assert client.get(f["url"]).status_code == 200
+    assert [f["name"] for f in client.get(f"/api/jobs/{jid}").json()["exports"]] == [f["name"] for f in files]
+    # laser: a kerf wider than the gap burns into the neighbour
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ruida", "kerf_mm": 5})
+    assert r.status_code == 400
+    assert client.post(f"/api/jobs/{jid}/export", json={"target": "ruida", "kerf_mm": 0.2}).status_code == 200
+
+
+def test_vbit_refused_as_cut_tool(client):
+    jid = new_job(client)["id"]
+    upload(client, jid)
+    assert client.post(f"/api/jobs/{jid}/nest", json={**FAST, "gap_mm": 7}).status_code == 200
+    vbit = by_name(client.get("/api/tools").json(), "60° V-bit")["id"]
+    r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": vbit})
+    assert r.status_code == 400 and "flat bit" in r.json()["detail"]
+
+
+def test_sheet_bigger_than_laser_bed_is_cut_down(client):
+    machines = client.get("/api/machines").json()
+    laser = next(m for m in machines if m["kind"] == "laser")
+    mats = client.get("/api/materials").json()
+    j = client.post("/api/jobs", json={"name": "Bed", "material_id": mats[0]["id"], "machine_id": laser["id"]}).json()
+    upload(client, j["id"])
+    r = client.post(f"/api/jobs/{j['id']}/nest", json=FAST)
+    assert r.status_code == 200, r.text
+    sh = r.json()["sheets"][0]
+    big, small = max(laser["bed_w"], laser["bed_h"]), min(laser["bed_w"], laser["bed_h"])
+    assert max(sh["width"], sh["height"]) <= big and min(sh["width"], sh["height"]) <= small

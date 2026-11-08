@@ -1,4 +1,16 @@
-# Nest app: 3D relief module (prototype)
+# Nest app
+
+Our own nesting app for the factory: SVG/DXF parts in, packed sheets out,
+NC Studio G-code (router, no tool changer) or Ruida DXF (laser), offcut
+library, cost estimate, and 3D relief from a picture. Full spec: PLAN.md.
+
+## Start
+    pip install -r requirements.txt
+    python -m app            # then open http://localhost:8040  (Windows: run.bat)
+Tests: `python -m pytest -q` (108 unit/API tests). Browser test: start the
+app on an empty data folder, then `node e2e/e2e.mjs`.
+
+# 3D relief module
 
 Turns a flat 2D picture (logo, sign artwork) into a carved 3D relief and
 writes G-code for an NC Studio router with no tool changer. Plain program

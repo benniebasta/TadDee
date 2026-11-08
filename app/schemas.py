@@ -51,7 +51,7 @@ class ToolIn(_In):
     feed_mm_min: float = Field(default=3000, gt=0)
     plunge_mm_min: float = Field(default=800, gt=0)
     rpm: int = Field(default=18000, gt=0)
-    pass_depth_mm: float = Field(default=3.0, gt=0)
+    pass_depth_mm: float = Field(default=3.0, ge=0.1)
 
 
 class ToolUpdate(_In):
@@ -62,7 +62,7 @@ class ToolUpdate(_In):
     feed_mm_min: float | None = Field(default=None, gt=0)
     plunge_mm_min: float | None = Field(default=None, gt=0)
     rpm: int | None = Field(default=None, gt=0)
-    pass_depth_mm: float | None = Field(default=None, gt=0)
+    pass_depth_mm: float | None = Field(default=None, ge=0.1)
 
 
 class ToolOut(BaseModel):

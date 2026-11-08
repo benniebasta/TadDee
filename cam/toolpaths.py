@@ -242,6 +242,7 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
 
     marks: list[tuple[list[tuple[float, float]], str, int]] = []
     rings_by_part: list[tuple[str, int, list[_Ring], list[_Ring]]] = []   # (part, copy, holes, outs)
+    placed_polys: list[list[Polygon]] = []                                # same index as rings_by_part
 
     for pl in sheet.placements:
         part = parts.get(pl.part_id)
@@ -293,6 +294,17 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
                 if len(pts) >= 2:
                     marks.append((pts, pl.part_id, pl.copy))
         rings_by_part.append((pl.part_id, pl.copy, holes, outs))
+        placed_polys.append(polys)
+
+    # A part nested inside another part's hole must be cut before that hole:
+    # once the hole is cut through, its slug (with the small part on it) is loose.
+    # depth = how many placed holes hold the part; deeper parts are cut first.
+    hole_areas = [[Polygon(h) for p in ps for h in p.interiors] for ps in placed_polys]
+    depth = []
+    for i, ps in enumerate(placed_polys):
+        pt = ps[0].representative_point() if ps else None
+        depth.append(0 if pt is None else sum(
+            1 for j, hs in enumerate(hole_areas) if j != i and any(h.contains(pt) for h in hs)))
 
     paths: list[ToolPath] = []
     pos = (0.0, 0.0)
@@ -332,7 +344,8 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
     # 1. marks, nearest neighbour from (0,0); a line may be cut from either end
     left = list(marks)
     pos = (0.0, 0.0)
-    me = -abs(s.engrave_depth_mm)
+    # never deeper than the profiles (PLAN 7: Z >= -(thickness + cut_through))
+    me = -min(abs(s.engrave_depth_mm), total) if total > 0 else -abs(s.engrave_depth_mm)
     while left:
         def md(q):
             p = left[q][0]
@@ -345,21 +358,25 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
         pos = pts[-1]
 
     if s.holes_first:
-        # 2. all holes, 3. all outside profiles; each group from (0,0)
-        nearest_rings([h for _, _, hs, _ in rings_by_part for h in hs], (0.0, 0.0))
-        nearest_rings([o for _, _, _, os_ in rings_by_part for o in os_], (0.0, 0.0))
+        # 2. all holes, 3. all outside profiles; each group from (0,0).
+        # Parts sitting in holes (deepest first) are finished before the hole around them.
+        for d in sorted(set(depth), reverse=True):
+            grp = [rp for k, rp in enumerate(rings_by_part) if depth[k] == d]
+            nearest_rings([h for _, _, hs, _ in grp for h in hs], (0.0, 0.0))
+            nearest_rings([o for _, _, _, os_ in grp for o in os_], (0.0, 0.0))
     else:
-        # part by part (nearest part first by its outside start), holes then outside
-        left_parts = list(rings_by_part)
+        # part by part (nearest part first by its outside start), holes then outside;
+        # parts sitting in holes (deepest first) before the part around them
+        left_parts = list(zip(depth, rings_by_part))
         pos = (0.0, 0.0)
 
         def pd(q):
-            _, _, hs, os_ = left_parts[q]
+            dq, (_, _, hs, os_) = left_parts[q]
             rs = os_ or hs
-            return min(start_dist(x, pos) for x in rs) if rs else float("inf")
+            return (-dq, min(start_dist(x, pos) for x in rs) if rs else float("inf"))
         while left_parts:
             j = min(range(len(left_parts)), key=lambda q: (pd(q), q))
-            _, _, hs, os_ = left_parts.pop(j)
+            _, (_, _, hs, os_) = left_parts.pop(j)
             pos = nearest_rings(hs, pos)
             pos = nearest_rings(os_, pos)
 

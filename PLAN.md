@@ -157,7 +157,7 @@ CNC rules (`cam/toolpaths.py`):
 - Start point: the ring vertex closest to the bottom-left of the sheet for outside cuts; for holes the vertex closest to the previous tool position.
 - Depth levels: total = thickness + cut_through for profiles; n = ceil(total / pass_depth); levels evenly spaced, last = -total. Marks: single level at -engrave_depth.
 - Tabs: only on the **last** level of outside profiles, only if `tabs` and the part is big enough per `tab_min_part_mm`. Count = clamp(round(perimeter / 400), 2, 8), centres evenly spaced by arc length, starting 1/2 spacing from the start point. Along a tab the Z is `-thickness + tab_height` (never below the level of the previous pass, never above 0); the tab length along the path = tab_width + tool diameter. Insert points exactly at tab start/end (split segments).
-- Order on a sheet: all marks (with mark_tool, own file if a different tool), then all holes, then all outside profiles. Inside each group, nearest-neighbour order starting from (0,0). Each part's levels are consecutive (all levels of one ring before moving on).
+- Order on a sheet: all marks (with mark_tool, own file if a different tool), then all holes, then all outside profiles. A part nested inside another part's hole is cut completely before that hole (deepest nesting first), or it would be cut out of a loose slug. Inside each group, nearest-neighbour order starting from (0,0). Each part's levels are consecutive (all levels of one ring before moving on).
 - Each `ToolPath` is one ring at one level, closed (first point == last point).
 - Marks on layer engrave/score: follow the line (on-line) at engrave depth with `mark_tool` (if None use `cut_tool`).
 - Warnings in plain words.
@@ -225,6 +225,14 @@ Views and **required `data-testid`s** (the e2e test depends on them, do not rena
 5. **Settings** `#/settings`: three editable tables (machines, tools, materials) with add/edit/delete (`settings-tools` table, `tool-add` button, form fields `tool-name`, `tool-diameter`, `tool-kind`, `tool-save`; same pattern for machines `machine-*` and materials `material-*` incl. `material-price`).
 - Errors from the API show in a toast (`toast`), never `alert()`. Loading states disable buttons.
 - `api.js` wraps fetch: JSON in/out, throws `Error(detail)`.
+
+### 4.9 Safety guards (added in integration review)
+- G-code export is refused when the nest gap is smaller than the cut bit diameter + 0.5 mm, or when the cut tool is a V-bit.
+- Laser export is refused when the kerf is wider than the nest gap.
+- Engrave depth is clamped to the profile depth. Pass depth is at least 0.1 mm.
+- A sheet bigger than the machine bed is nested as the bed-sized piece of it.
+- Marks that stick out of their part are cut back to the part outline.
+- Export warns when parts or quantities changed after the last nest.
 
 ## 5. Features list (v1 acceptance)
 1. Import SVG and DXF from Illustrator/CorelDRAW: curves, holes, islands, open lines as marks, units, warnings.

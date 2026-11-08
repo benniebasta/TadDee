@@ -27,6 +27,7 @@ from shapely import affinity, make_valid
 from shapely.geometry import LineString, MultiPolygon, Polygon
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
 
 from core.models import Part
 
@@ -411,8 +412,10 @@ def _group_rings(polys: list[Polygon]) -> list[Polygon]:
     polys = sorted(polys, key=lambda p: p.area, reverse=True)
     depth = [0] * len(polys)
     parent = [-1] * len(polys)
+    tree = STRtree(polys)                       # only rings whose box touches p can hold it
     for i, p in enumerate(polys):
-        for j in range(i - 1, -1, -1):          # walk back = smallest container first
+        cands = sorted((int(j) for j in tree.query(p) if j < i), reverse=True)
+        for j in cands:                         # walk back = smallest container first
             if _inside(p, polys[j]):
                 parent[i], depth[i] = j, depth[j] + 1
                 break
@@ -449,7 +452,7 @@ def _assign_marks(lines: list[_Piece], shapes: list[Polygon],
     """Give each open line to the smallest part that contains its midpoint."""
     marks: dict[int, list[tuple[LineString, str]]] = {}
     order = sorted(range(len(shapes)), key=lambda i: shapes[i].area)
-    dropped = 0
+    dropped = clipped = 0
     kept = {"engrave": 0, "score": 0}
     for ln in lines:
         line = LineString(ln.pts)
@@ -460,13 +463,26 @@ def _assign_marks(lines: list[_Piece], shapes: list[Polygon],
         if home is None:
             dropped += 1
             continue
-        marks.setdefault(home, []).append((line, ln.layer))
+        # keep only the piece on the part: the nester packs other parts right next to it,
+        # so a line sticking out would be engraved across the neighbour
+        inside = line.intersection(shapes[home])
+        pieces = [g for g in getattr(inside, "geoms", [inside])
+                  if isinstance(g, LineString) and g.length > JOIN_TOL_MM]
+        if not pieces:
+            dropped += 1
+            continue
+        if sum(g.length for g in pieces) < line.length - JOIN_TOL_MM:
+            clipped += 1
+        for g in pieces:
+            marks.setdefault(home, []).append((g, ln.layer))
         kept[ln.layer] += 1
     for layer, n in kept.items():
         if n:
             warnings.append(f"{n} open line(s) were kept as {layer} marks")
     if dropped:
         warnings.append(f"{dropped} open line(s) outside every part were dropped")
+    if clipped:
+        warnings.append(f"{clipped} open line(s) went past the edge of their part and were cut back to it")
     return marks
 
 

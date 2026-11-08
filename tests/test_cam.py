@@ -346,3 +346,24 @@ def test_gcode_tab_steps_down_at_plunge_feed(tmp_path):
     # last-level plunge of the hole and of the outside + one step down at the
     # end of each of the 2 tabs
     assert lines.count("G1 Z-3.3 F800") == 4
+
+
+@pytest.mark.parametrize("holes_first", [True, False])
+def test_part_inside_a_hole_is_cut_before_that_hole(holes_first):
+    # once a hole is cut through its slug is loose, so a part nested in it must be done first
+    frame = Part("f", "frame", Polygon([(0, 0), (300, 0), (300, 300), (0, 300)],
+                                       [[(50, 50), (250, 50), (250, 250), (50, 250)]]))
+    small = Part("s", "small", Polygon([(0, 0), (60, 0), (60, 60), (0, 60)]))
+    pls = [Placement("f", 0, 10, 10, 0), Placement("s", 0, 67, 67, 0)]
+    paths, _ = sheet_toolpaths(sheet_of(pls), {"f": frame, "s": small}, CUT, None,
+                               CamSettings(thickness_mm=18, holes_first=holes_first))
+    first_frame_hole = next(i for i, p in enumerate(paths) if p.part_id == "f" and p.kind == "inside")
+    last_small = max(i for i, p in enumerate(paths) if p.part_id == "s")
+    assert last_small < first_frame_hole
+
+
+def test_engrave_depth_never_below_cut_depth():
+    part = rect_with_hole(marks=[LineString([(20, 10), (80, 10)])])
+    s = CamSettings(thickness_mm=3, engrave_depth_mm=50)
+    paths, _ = sheet_toolpaths(sheet_of([Placement("p1", 0, 10, 10, 0)]), {"p1": part}, CUT, None, s)
+    assert min(z for p in paths for _, _, z in p.points) >= -(3 + s.cut_through_mm) - 1e-9

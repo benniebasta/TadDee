@@ -340,3 +340,19 @@ def test_benchmark_60_mixed_parts_first_attempt():
     assert sum(len(s.placements) for s in res.sheets) + sum(res.unplaced.values()) == 60
     assert not res.unplaced
     assert validate(res, parts, [SHEET], st) == []
+
+
+def test_part_far_bigger_than_sheet_is_not_rasterised():
+    # a drawing read in the wrong units (inch as mm) can be 60 m long; its grid alone
+    # used to take ~8 GB. It must simply go to unplaced, quickly.
+    import time as _time
+    from shapely.geometry import box as _box
+    from core.models import NestSettings as _NS, Part as _Part, SheetSpec as _Sheet
+    from nesting.engine import nest as _nest
+    big = _Part("big", "big", _box(0, 0, 62000, 31000))
+    small = _Part("s", "small", _box(0, 0, 100, 100))
+    t0 = _time.perf_counter()
+    r = _nest([big, small], [_Sheet("sheet", 2440, 1220)], _NS(time_limit_s=0))
+    assert r.unplaced == {"big": 1}
+    assert len(r.sheets) == 1 and len(r.sheets[0].placements) == 1
+    assert _time.perf_counter() - t0 < 2.0
