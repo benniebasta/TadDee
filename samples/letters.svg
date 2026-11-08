@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="660mm" height="190mm" viewBox="0 0 660 190">
+  <path transform="translate(20 20)" d="M0 150 L45 0 L85 0 L130 150 L95 150 L86 118 L44 118 L35 150 Z M52 90 L78 90 L65 42 Z" fill="#000" fill-rule="evenodd"/>
+  <path transform="translate(175 20)" d="M0 0 L55 0 C 115 0, 130 40, 130 75 C 130 110, 115 150, 55 150 L0 150 Z M32 30 L52 30 C 85 30, 97 50, 97 75 C 97 100, 85 120, 52 120 L32 120 Z" fill="#000" fill-rule="evenodd"/>
+  <path transform="translate(330 20)" d="M65 0 A65 75 0 1 0 65 150 A65 75 0 1 0 65 0 Z M65 32 A33 43 0 1 1 65 118 A33 43 0 1 1 65 32 Z" fill="#000" fill-rule="evenodd"/>
+  <path transform="translate(485 20)" d="M0 150 L0 0 L32 0 L98 98 L98 0 L130 0 L130 150 L98 150 L32 52 L32 150 Z" fill="#000" fill-rule="evenodd"/>
+</svg>

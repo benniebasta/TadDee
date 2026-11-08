@@ -2,4 +2,13 @@ numpy
 scipy
 pillow
 matplotlib
+shapely>=2.0
+pyclipper
+ezdxf
+svgelements
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+python-multipart
+httpx
 pytest
