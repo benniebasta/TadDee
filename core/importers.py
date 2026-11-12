@@ -1,4 +1,4 @@
-"""Read SVG and DXF cut files into Parts (PLAN.md section 4.2).
+"""Read SVG, DXF, PDF and AI cut files into Parts (PLAN.md section 4.2, 2.10).
 
 Flow for both formats:
   1. read the file into flat polylines in millimetres, Y up
@@ -32,6 +32,8 @@ from shapely.strtree import STRtree
 from core.models import Part
 
 PX_TO_MM = 25.4 / 96.0          # SVG user units are px at 96 ppi
+PT_TO_MM = 25.4 / 72.0          # PDF user units are points (1/72 inch)
+PDF_PAGE_GAP_MM = 20.0          # pages of a multi-page PDF are stacked top to bottom with this gap
 JOIN_TOL_MM = 0.02              # endpoints closer than this are the same point
 MIN_RING_AREA_MM2 = 1.0         # smaller closed shapes are dust, dropped
 SCORE_BLUE = "#0000ff"          # SVG stroke colour that means "score" instead of "engrave"
@@ -70,10 +72,10 @@ class _Piece:
 
 def import_file(data: bytes, filename: str, *, tolerance_mm: float = 0.05,
                 default_units: str = "mm") -> ImportReport:
-    """Read one SVG or DXF file (given as bytes) and return its parts."""
+    """Read one SVG, DXF, PDF or AI file (given as bytes) and return its parts."""
     ext = PurePath(filename or "").suffix.lower()
-    if ext not in (".svg", ".dxf"):
-        raise ImportError_("Only SVG or DXF files")
+    if ext not in (".svg", ".dxf", ".pdf", ".ai"):
+        raise ImportError_("Only SVG, DXF, PDF or AI files")
     if not data or not data.strip():
         raise ImportError_(f"{filename} is empty")
     tol = max(float(tolerance_mm), 0.001)
@@ -81,13 +83,15 @@ def import_file(data: bytes, filename: str, *, tolerance_mm: float = 0.05,
     try:
         if ext == ".svg":
             pieces, units = _read_svg(data, tol, warnings)
+        elif ext in (".pdf", ".ai"):
+            pieces, units = _read_pdf(data, filename, tol, warnings)
         else:
             pieces, units = _read_dxf(data, tol, default_units, warnings)
         parts = _build_parts(pieces, PurePath(filename).stem, filename, warnings)
     except ImportError_:
         raise
     except Exception:   # any library failure means the file is broken for us
-        kind = "SVG" if ext == ".svg" else "DXF"
+        kind = {".svg": "SVG", ".dxf": "DXF", ".ai": "AI (PDF-compatible)"}.get(ext, "PDF")
         raise ImportError_(f"Could not read {filename}: it does not look like a valid {kind} file") from None
     if not parts:
         raise ImportError_("No closed shapes found")
@@ -310,6 +314,159 @@ def _ellipse_is_full(ent) -> bool:
     """True if a DXF ELLIPSE goes all the way round."""
     span = (ent.dxf.end_param - ent.dxf.start_param) % (2 * math.pi)
     return span < 1e-6 or abs(span - 2 * math.pi) < 1e-6
+
+
+# ----------------------------------------------------------------------------
+# PDF and AI (Illustrator files saved with "Create PDF Compatible File")
+# ----------------------------------------------------------------------------
+
+def _read_pdf(data: bytes, filename: str, tol_mm: float,
+              warnings: list[str]) -> tuple[list[_Piece], str]:
+    """Flatten the vector paths of every page into mm pieces (Y flipped to up).
+
+    Uses pymupdf page.get_drawings(): lines, cubic curves, rectangles and quads.
+    Stroke colour pure blue means score, like the SVG importer. Text that was not
+    turned into outlines and pictures cannot be cut: they are skipped with a warning.
+    Pages are stacked top to bottom so parts of page 1 come first.
+    """
+    import pymupdf
+
+    is_ai = PurePath(filename or "").suffix.lower() == ".ai"
+    head = data[:1024]
+    if b"%PDF" not in head:
+        if is_ai:
+            raise ImportError_(f"{filename} is an old Illustrator file without PDF content: "
+                               "save it again with \"Create PDF Compatible File\" ticked, or export SVG/PDF")
+        raise ImportError_(f"Could not read {filename}: it does not look like a valid PDF file")
+    try:
+        doc = pymupdf.open(stream=data, filetype="pdf")
+    except Exception:
+        raise ImportError_(f"Could not read {filename}: the file is damaged or not a PDF") from None
+    if doc.needs_pass:
+        raise ImportError_(f"{filename} is password protected: save it without a password")
+    if is_ai and doc.page_count > 1:
+        doc = _first_page_only(doc)      # AI files carry extra private pages; the artboard is page 1
+    tol_pt = tol_mm / PT_TO_MM
+    pieces: list[_Piece] = []
+    texts = images = 0
+    raster_pages: list[int] = []
+    y_off = 0.0                          # mm, grows downwards page by page
+    for pno, page in enumerate(doc):
+        mat = page.rotation_matrix if page.rotation else None
+        page_pieces: list[_Piece] = []
+        for d in page.get_drawings():
+            page_pieces.extend(_pdf_path_pieces(d, tol_pt, mat))
+        for pc in page_pieces:
+            pc.pts = [(x * PT_TO_MM, -y * PT_TO_MM - y_off) for x, y in pc.pts]
+        pieces.extend(page_pieces)
+        n_text = _pdf_text_lines(page)
+        n_img = len(page.get_image_info())
+        texts += n_text
+        images += n_img
+        if n_img and not page_pieces:
+            raster_pages.append(pno + 1)
+        y_off += page.rect.height * PT_TO_MM + PDF_PAGE_GAP_MM
+    pages = doc.page_count
+    doc.close()
+    if raster_pages and not pieces:
+        raise ImportError_(f"{filename} has only pictures (raster), no vector cut lines: "
+                           "export the cut lines as vector paths (SVG, DXF or a vector PDF)")
+    if texts:
+        warnings.append(f"{texts} text item(s) skipped: text not converted to outlines "
+                        "(use Create Outlines / Convert to Curves before saving)")
+    if raster_pages:
+        listed = ", ".join(str(n) for n in raster_pages)
+        warnings.append(f"page {listed} has only pictures (raster), nothing to cut there")
+    if images:
+        warnings.append(f"{images} image(s) skipped: pictures cannot be cut, use vector shapes")
+    if pages > 1:
+        warnings.append(f"{pages} pages were read, stacked top to bottom")
+    return pieces, "pt"
+
+
+def _first_page_only(doc):
+    import pymupdf
+
+    one = pymupdf.open()
+    one.insert_pdf(doc, from_page=0, to_page=0)
+    doc.close()
+    return one
+
+
+def _pdf_text_lines(page) -> int:
+    """Number of text lines on a page (text still as a font, not outlines)."""
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return 1 if page.get_text().strip() else 0
+    return sum(1 for b in blocks if b.get("type") == 0
+               for ln in b.get("lines", []) if any(sp.get("text", "").strip() for sp in ln.get("spans", [])))
+
+
+def _pdf_layer(d: dict) -> str:
+    c = d.get("color")
+    if c is not None and len(c) >= 3 and c[0] < 0.02 and c[1] < 0.02 and c[2] > 0.98:
+        return "score"
+    return "engrave"
+
+
+def _pdf_path_pieces(d: dict, tol_pt: float, mat) -> list[_Piece]:
+    """Split one get_drawings() path into subpaths (a new one starts wherever an
+    item does not begin at the previous end) and flatten them, in points, y down."""
+    has_fill = d.get("fill") is not None
+    has_stroke = d.get("color") is not None
+    if not has_fill and not has_stroke:
+        return []
+    layer = _pdf_layer(d)
+    out: list[_Piece] = []
+    cur: list[tuple[float, float]] = []
+
+    def tp(p):
+        q = p * mat if mat is not None else p
+        return (float(q.x), float(q.y))
+
+    def flush(closed: bool = False):
+        nonlocal cur
+        pts = _dedupe(cur)
+        if len(pts) >= 2:
+            if not closed and len(pts) >= 3 and _close_enough(pts[0], pts[-1], 1e-3):
+                closed = True
+            if not closed and has_fill and not has_stroke and len(pts) >= 3:
+                closed = True             # a filled area is closed even without "h"
+            out.append(_Piece(pts, closed, layer))
+        cur = []
+
+    for it in d.get("items", []):
+        op = it[0]
+        if op == "re":
+            flush()
+            r = it[1]
+            cur = [tp(r.tl), tp(r.tr), tp(r.br), tp(r.bl), tp(r.tl)]
+            flush(True)
+            continue
+        if op == "qu":
+            flush()
+            q = it[1]
+            cur = [tp(q.ul), tp(q.ur), tp(q.lr), tp(q.ll), tp(q.ul)]
+            flush(True)
+            continue
+        start = tp(it[1])
+        if cur and math.hypot(start[0] - cur[-1][0], start[1] - cur[-1][1]) > 1e-3:
+            flush()
+        if not cur:
+            cur.append(start)
+        if op == "l":
+            cur.append(tp(it[2]))
+        elif op == "c":
+            p = [np.array(tp(v)) for v in it[1:5]]
+            m = max(np.linalg.norm(p[0] - 2 * p[1] + p[2]), np.linalg.norm(p[1] - 2 * p[2] + p[3]))
+            n = _steps_from_second_diff(6.0 * m, tol_pt)
+            for t in np.linspace(0.0, 1.0, n + 1)[1:]:
+                u = 1.0 - t
+                b = u ** 3 * p[0] + 3 * u * u * t * p[1] + 3 * u * t * t * p[2] + t ** 3 * p[3]
+                cur.append((float(b[0]), float(b[1])))
+    flush(bool(d.get("closePath")))
+    return out
 
 
 # ----------------------------------------------------------------------------

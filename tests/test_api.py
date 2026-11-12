@@ -190,7 +190,7 @@ def test_upload_and_parts(client):
 def test_upload_errors(client):
     j = new_job(client)
     r = client.post(f"/api/jobs/{j['id']}/files", files=[("file", ("notes.txt", b"hello", "text/plain"))])
-    assert r.status_code == 400 and "SVG or DXF" in r.json()["detail"]
+    assert r.status_code == 400 and "SVG, DXF, PDF or AI" in r.json()["detail"]
     r = client.post(f"/api/jobs/{j['id']}/files", files=[("file", ("bad.svg", b"<svg><<<", "image/svg+xml"))])
     assert r.status_code == 400 and isinstance(r.json()["detail"], str)
     big = b"<svg>" + b" " * (20 * 1024 * 1024 + 10) + b"</svg>"

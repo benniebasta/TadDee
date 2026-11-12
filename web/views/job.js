@@ -4,6 +4,7 @@ import { t } from '../i18n.js';
 import { h, fill, field, select, busy, toast, toastError, confirmDialog, svgBox,
   num, money, pct, idOf, numVal, icon, panelSection, canvasView } from '../ui.js';
 import { idNum } from './jobs.js';
+import { simButton, isNc } from './sim.js';
 
 // Nest option tables (values are stable for tests; labels are translated).
 const ROTATIONS = [
@@ -81,7 +82,7 @@ export async function render(root, { id }, isCurrent) {
   const warnBox = h('div', { class: 'warnings hidden', testid: 'import-warnings', role: 'status' });
   const partsBody = h('tbody');
   const partsEmpty = h('p', { class: 'empty' }, t('no_parts'));
-  const fileInput = h('input', { type: 'file', testid: 'file-input', accept: '.svg,.dxf', multiple: true, id: 'file-input' });
+  const fileInput = h('input', { type: 'file', testid: 'file-input', accept: '.svg,.dxf,.pdf,.ai', multiple: true, id: 'file-input' });
   const dropLabel = h('span', {}, t('drop_files'));
   const drop = h('label', { class: 'dropzone', for: 'file-input' }, icon('upload', 22), h('strong', {}, t('choose_files')), dropLabel,
     h('span', { class: 'muted small' }, t('file_types')));
@@ -331,14 +332,23 @@ export async function render(root, { id }, isCurrent) {
 
   function renderFiles() {
     const files = S.job.exports || [];
+    const fileHref = (f) => f.url || url(`/jobs/${jid}/files/${encodeURIComponent(f.name)}`);
     filesBox.replaceChildren(...(files.length ? files.map((f) => h('div', { class: 'file' },
-      h('a', { href: f.url || url(`/jobs/${jid}/files/${encodeURIComponent(f.name)}`), download: f.name, testid: 'export-file' }, f.name),
+      h('a', { href: fileHref(f), download: f.name, testid: 'export-file' }, f.name),
+      isNc(f.name) ? simButton(() => ({ url: fileHref(f), name: f.name, expectZ: expectedZ() })) : null,
       h('span', { class: 'muted small' }, [f.tool ? f.tool : null, f.minutes != null ? t('minutes_n', { n: num(f.minutes, 1) }) : null,
         f.size != null ? `${num(f.size / 1024, 1)} KB` : null].filter(Boolean).join(' · '))))
       : [h('p', { class: 'muted' }, t('no_files'))]));
     zipLink.classList.toggle('hidden', !files.length);
     commitBtn.disabled = !S.job.nest || S.job.status === 'cut';
     commitBtn.textContent = S.job.status === 'cut' ? t('already_cut') : t('mark_cut');
+  }
+
+  // Deepest Z the CNC file should reach: material thickness + cut-through (simulator check).
+  let cutThrough = 0.3;
+  function expectedZ() {
+    const th = Number(material()?.thickness_mm);
+    return Number.isFinite(th) && th > 0 ? -(th + cutThrough) : undefined;
   }
 
   function renderExport() {
@@ -362,7 +372,9 @@ export async function render(root, { id }, isCurrent) {
       const tabH = h('input', { type: 'number', min: '0', step: '0.1', value: '1.5', testid: 'export-tab-height', inputmode: 'decimal' });
       const climb = h('input', { type: 'checkbox', testid: 'export-climb', checked: true });
       btn = h('button', { class: 'btn primary big block', testid: 'export-ncstudio' }, icon('export', 18), t('make_gcode'));
+      through.addEventListener('change', () => { if (!(S.job.exports || []).length) cutThrough = numVal(through) ?? 0.3; });
       btn.addEventListener('click', () => {
+        cutThrough = numVal(through) ?? 0.3;
         const body = { target: 'ncstudio', cut_tool_id: idNum(toolSel.value),
           cam: { cut_through_mm: numVal(through) ?? 0.3, tabs: tabs.checked, tab_width_mm: numVal(tabW) ?? 6,
             tab_height_mm: numVal(tabH) ?? 1.5, climb: climb.checked } };

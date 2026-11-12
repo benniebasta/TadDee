@@ -1,6 +1,7 @@
 // Relief page (#/relief): picture -> 3D relief G-code (rough + finish), editable styles.
 import { api, url } from '../api.js';
 import { t } from '../i18n.js';
+import { simButton, isNc } from './sim.js';
 import { h, fill, field, select, busy, toast, num, numVal, icon, panelSection, canvasView } from '../ui.js';
 
 const PROFILES = ['dome', 'flat', 'bevel', 'engrave', 'background'];
@@ -108,6 +109,8 @@ export async function render(root, _params, isCurrent) {
 
     const files = (r.files || []).map((f, i) => h('div', { class: 'file' },
       h('a', { href: fileUrl(r, f.name, i), download: f.name, testid: 'relief-file' }, f.name),
+      isNc(f.name) ? simButton(() => ({ url: fileUrl(r, f.name, i), name: f.name,
+        expectZ: Number.isFinite(Number(r.depth_mm)) && Number(r.depth_mm) > 0 ? -(Number(r.depth_mm) + 0.02) : undefined })) : null,
       h('span', { class: 'muted small' }, [f.tool, f.minutes != null ? t('minutes_n', { n: num(f.minutes, 1) }) : null,
         f.deepest_z != null ? `Z ${num(f.deepest_z, 2)}` : null].filter(Boolean).join(' · '))));
     const extra = (r.images || []).map((name, i) => h('a', { class: 'small', href: imgUrls[i] || relUrl(r, name), download: name }, name));

@@ -1,6 +1,7 @@
 // End-to-end test of the Nest app through the browser.
 // Usage: start the app (NEST_DATA_DIR=<empty dir> python -m app), then
 //   node e2e/e2e.mjs [baseUrl]
+// baseUrl defaults to $NEST_E2E_BASE, else http://127.0.0.1:$NEST_PORT (default port 8040).
 // Uses the globally installed Playwright + Chromium. Screenshots go to e2e/results/.
 import { createRequire } from 'module';
 import fs from 'fs';
@@ -13,7 +14,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const out = path.join(here, 'results');
 fs.mkdirSync(out, { recursive: true });
-const BASE = process.argv[2] || 'http://127.0.0.1:8040';
+const BASE = process.argv[2] || process.env.NEST_E2E_BASE || `http://127.0.0.1:${process.env.NEST_PORT || 8040}`;
 
 const results = [];
 const consoleErrors = [];
@@ -159,6 +160,38 @@ await step('export NC Studio G-code', async () => {
   expect(zip.ok() && (await zip.body()).subarray(0, 2).toString() === 'PK', 'zip broken');
 }, page);
 
+await step('simulate exported G-code', async () => {
+  const btn = page.locator('[data-testid="export-files"] [data-testid="sim-open"]').first();
+  await btn.click();
+  await tid(page, 'sim-canvas').waitFor();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="sim-play"]')?.disabled, null, { timeout: 30000 });
+  const stats = await tid(page, 'sim-stats').innerText();
+  expect(/Lines|บรรทัด/.test(stats) && /\d/.test(stats), `no stats: ${stats}`);
+  expect(/-3\.3/.test(stats), `deepest Z not shown: ${stats}`);
+  const warn = await tid(page, 'sim-warnings').innerText();
+  expect(/No problems|ไม่พบปัญหา/.test(warn), `our own file has warnings: ${warn}`);
+  await tid(page, 'sim-speed').selectOption('50');
+  await tid(page, 'sim-play').click();
+  await page.waitForTimeout(1200);
+  const v1 = Number(await tid(page, 'sim-slider').inputValue());
+  expect(v1 > 0, 'slider did not move while playing');
+  const pos = await tid(page, 'sim-pos').innerText();
+  expect(/X/.test(pos) && /Z/.test(pos), `no position readout: ${pos}`);
+  // something was drawn on the canvases
+  const painted = await page.evaluate(() => [...document.querySelectorAll('.sim-cv')].some((c) => {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    for (let i = 3; i < d.length; i += 64) if (d[i]) return true;
+    return false;
+  }));
+  expect(painted, 'nothing drawn on the simulator canvas');
+  await tid(page, 'sim-play').click();       // pause
+  await tid(page, 'sim-slider').fill('5000');
+  await tid(page, 'sim-next').click();
+  await page.screenshot({ path: path.join(out, `${String(++shot).padStart(2, '0')}-simulator.png`) });
+  await tid(page, 'sim-close').click();
+  expect(await tid(page, 'sim-canvas').count() === 0, 'simulator did not close');
+}, page);
+
 await step('switch job to laser and export Ruida DXF', async () => {
   const id = jobUrl.split('/').pop();
   const machines = await (await page.request.get(`${BASE}/api/machines`)).json();
@@ -231,6 +264,22 @@ await step('3D relief from a picture', async () => {
   expect(files.filter((h) => /\.nc$/i.test(h)).length === 2, `relief files ${files}`);
 }, page);
 
+await step('simulate the relief finishing file', async () => {
+  const btn = page.locator('[data-testid="relief-files"] [data-testid="sim-open"]').last();
+  const t0 = Date.now();
+  await btn.click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="sim-play"]')?.disabled, null, { timeout: 60000 });
+  const ms = Date.now() - t0;
+  const stats = await tid(page, 'sim-stats').innerText();
+  console.log(`  relief file opened in the simulator in ${ms} ms: ${stats.replace(/\s+/g, ' ')}`);
+  await tid(page, 'sim-play').click();
+  await page.waitForTimeout(500);
+  await tid(page, 'sim-view').click();          // 3D view
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Escape');
+  expect(await tid(page, 'sim-canvas').count() === 0, 'simulator did not close on Escape');
+}, page);
+
 await step('relief: edit a height and update', async () => {
   const input = tid(page, 'relief-regions').locator('tbody tr').nth(1).locator('input[type="number"]').first();
   await input.fill('3');
@@ -256,6 +305,18 @@ await step('phone layout renders', async () => {
   await p.getByTestId('parts-table').waitFor();
   const overflow = await p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   await p.screenshot({ path: path.join(out, `${String(++shot).padStart(2, '0')}-phone.png`), fullPage: true });
+  // the simulator works on the phone too
+  const sim = p.locator('[data-testid="export-files"] [data-testid="sim-open"]').first();
+  if (await sim.count()) {
+    await sim.click();
+    await p.waitForFunction(() => !document.querySelector('[data-testid="sim-play"]')?.disabled, null, { timeout: 30000 });
+    await p.getByTestId('sim-play').click();
+    await p.waitForTimeout(400);
+    const so = await p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    await p.screenshot({ path: path.join(out, `${String(++shot).padStart(2, '0')}-phone-sim.png`) });
+    expect(so <= 2, `simulator is ${so}px wider than the phone screen`);
+    await p.getByTestId('sim-close').click();
+  }
   await m.close();
   expect(overflow <= 2, `page is ${overflow}px wider than the phone screen`);
 }, null);

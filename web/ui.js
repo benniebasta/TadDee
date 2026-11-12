@@ -191,6 +191,10 @@ const ICONS = {
   check: 'M5 12l5 5 9-10',
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01',
   file: 'M6 3h8l4 4v14H6zM14 3v4h4',
+  play: 'M8 5v14l11-7z',
+  pause: 'M8 5v14M16 5v14',
+  prev: 'M18 6l-8 6 8 6zM6 6v12',
+  next: 'M6 6l8 6-8 6zM18 6v12',
 };
 export function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg';

@@ -170,8 +170,8 @@ def test_no_closed_shapes():
 
 
 def test_wrong_extension_and_empty():
-    with pytest.raises(ImportError_, match="Only SVG or DXF files"):
-        import_file(b"hello", "drawing.pdf")
+    with pytest.raises(ImportError_, match="Only SVG, DXF, PDF or AI files"):
+        import_file(b"hello", "drawing.txt")
     with pytest.raises(ImportError_):
         import_file(b"", "empty.svg")
 

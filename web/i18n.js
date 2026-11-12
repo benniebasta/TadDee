@@ -13,8 +13,8 @@ const en = {
   status_draft: 'Draft', status_nested: 'Nested', status_exported: 'Exported', status_cut: 'Cut',
   delete_job: 'Delete job', confirm_delete_job: 'Delete job “{name}” and all its files?',
   // parts
-  parts: 'Parts', choose_files: 'Choose files', drop_files: 'or drop SVG / DXF files here', file_types: 'SVG or DXF, up to 20 MB each',
-  uploading: 'Uploading…', imported_n: '{n} parts imported', import_warnings: 'Import notes', no_parts: 'No parts yet. Add an SVG or DXF file.',
+  parts: 'Parts', choose_files: 'Choose files', drop_files: 'or drop SVG / DXF / PDF / AI files here', file_types: 'SVG, DXF, PDF or AI (PDF compatible), up to 20 MB each',
+  uploading: 'Uploading…', imported_n: '{n} parts imported', import_warnings: 'Import notes', no_parts: 'No parts yet. Add an SVG, DXF, PDF or AI file.',
   name: 'Name', size_mm: 'Size (mm)', holes: 'Holes', qty: 'Qty', marks_n: '{n} marks ({layer})', err_qty: 'Quantity must be 0 to 999.',
   // nest
   nest: 'Nest', nesting: 'Nesting…', gap_mm: 'Gap between parts (mm)', gap_hint: 'CNC: bit diameter + 1 mm · laser: 2 mm',
@@ -60,10 +60,29 @@ const en = {
   // workspace (makeover)
   theme_light: 'Light workspace', theme_dark: 'Dark workspace', click_show: 'Show this sheet',
   parts_board: 'All parts · {n} copies to cut', canvas_empty_title: 'No parts yet',
-  canvas_empty: 'Drop SVG or DXF files here, or click to choose', copies_n: '{n} copies', cut: 'Cutting',
+  canvas_empty: 'Drop SVG, DXF, PDF or AI files here, or click to choose', copies_n: '{n} copies', cut: 'Cutting',
   relief_canvas_empty_title: 'No picture yet', relief_canvas_empty: 'Choose a picture to carve (PNG or JPG)',
   relief_regions_empty: 'Make the relief first; each colour of the picture then gets its own shape here.',
   relief_status_empty: 'Choose a picture, set the size, press Make relief', picture_and_size: 'Picture and size',
+  // G-code simulator
+  sim_open: 'Simulate', sim_title: 'G-code simulator', sim_loading: 'Loading the file…', sim_parsing: 'Reading G-code… {p} %',
+  sim_err_load: 'Could not open the file', sim_play: 'Play', sim_pause: 'Pause', sim_prev: 'Previous move', sim_next: 'Next move',
+  sim_scrub: 'Position in the program', sim_speed: 'Speed', sim_view_3d: '3D view', sim_view_top: 'Top view', sim_fit: 'Fit (0)',
+  sim_totals: 'Totals', sim_warnings: 'Checks', sim_lines: 'Lines', sim_moves: 'Moves', sim_cut: 'Cut length',
+  sim_rapid: 'Rapid length', sim_time: 'Estimated time', sim_zmin: 'Deepest Z', sim_area: 'Cut area', sim_expect: 'Expected depth',
+  sim_line: 'Line', sim_rapid_move: 'rapid', sim_above: 'cut above Z0', sim_zx: 'Z shown ×{k}',
+  sim_no_warnings: 'No problems found',
+  simw_too_deep: '{n} move(s) go deeper than expected: Z {z} (expected {e} mm)',
+  simw_outside: '{n} move(s) go outside the sheet',
+  simw_air_cut: '{n} cutting move(s) above Z0 that do not plunge (cutting air)',
+  simw_no_m30: 'The file does not end with M30',
+  simw_spindle_off: '{n} cut(s) below Z0 with the spindle off (no M3)',
+  simw_no_feed: '{n} cutting move(s) without a feed rate F',
+  simw_bad_arc: '{n} arc(s) with a radius that does not fit their end points',
+  simw_plane: '{n} line(s) use an arc plane other than XY (G17)',
+  simw_tool_change: '{n} tool change(s) M06: the router has no tool changer',
+  simw_after_end: '{n} move(s) after M30 are ignored',
+  simw_unsupported: '{n} line(s) with a G-code the simulator does not know ({word})',
 };
 
 const th = {
@@ -75,8 +94,8 @@ const th = {
   no_jobs: 'ยังไม่มีงาน กด “งานใหม่” เพื่อเริ่ม', err_job_name: 'กรุณาพิมพ์ชื่องาน', back_jobs: 'กลับไปหน้างาน',
   status_draft: 'ร่าง', status_nested: 'วางแล้ว', status_exported: 'ส่งออกแล้ว', status_cut: 'ตัดแล้ว',
   delete_job: 'ลบงาน', confirm_delete_job: 'ลบงาน “{name}” และไฟล์ทั้งหมดใช่ไหม',
-  parts: 'ชิ้นงาน', choose_files: 'เลือกไฟล์', drop_files: 'หรือลากไฟล์ SVG / DXF มาวางที่นี่', file_types: 'SVG หรือ DXF ไม่เกินไฟล์ละ 20 MB',
-  uploading: 'กำลังอัปโหลด…', imported_n: 'นำเข้า {n} ชิ้นแล้ว', import_warnings: 'หมายเหตุการนำเข้า', no_parts: 'ยังไม่มีชิ้นงาน เพิ่มไฟล์ SVG หรือ DXF',
+  parts: 'ชิ้นงาน', choose_files: 'เลือกไฟล์', drop_files: 'หรือลากไฟล์ SVG / DXF / PDF / AI มาวางที่นี่', file_types: 'SVG, DXF, PDF หรือ AI (แบบ PDF compatible) ไม่เกินไฟล์ละ 20 MB',
+  uploading: 'กำลังอัปโหลด…', imported_n: 'นำเข้า {n} ชิ้นแล้ว', import_warnings: 'หมายเหตุการนำเข้า', no_parts: 'ยังไม่มีชิ้นงาน เพิ่มไฟล์ SVG, DXF, PDF หรือ AI',
   name: 'ชื่อ', size_mm: 'ขนาด (มม.)', holes: 'รู', qty: 'จำนวน', marks_n: 'เส้นมาร์ค {n} เส้น ({layer})', err_qty: 'จำนวนต้องอยู่ระหว่าง 0 ถึง 999',
   nest: 'วางชิ้นงาน', nesting: 'กำลังวางชิ้นงาน…', gap_mm: 'ระยะห่างระหว่างชิ้น (มม.)', gap_hint: 'CNC: ขนาดดอกกัด + 1 มม. · เลเซอร์: 2 มม.',
   rotations: 'การหมุน', rot_0_180: '0/180', rot_90: '0/90/180/270', rot_45: 'ทุก 45°', rot_15: 'ทุก 15°',
@@ -117,10 +136,29 @@ const th = {
   // workspace (makeover)
   theme_light: 'พื้นที่ทำงานสีสว่าง', theme_dark: 'พื้นที่ทำงานสีเข้ม', click_show: 'แสดงแผ่นนี้',
   parts_board: 'ชิ้นงานทั้งหมด · ต้องตัด {n} ชิ้น', canvas_empty_title: 'ยังไม่มีชิ้นงาน',
-  canvas_empty: 'ลากไฟล์ SVG หรือ DXF มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์', copies_n: '{n} ชิ้น', cut: 'เวลาตัด',
+  canvas_empty: 'ลากไฟล์ SVG, DXF, PDF หรือ AI มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์', copies_n: '{n} ชิ้น', cut: 'เวลาตัด',
   relief_canvas_empty_title: 'ยังไม่มีรูป', relief_canvas_empty: 'เลือกรูปที่จะแกะนูน (PNG หรือ JPG)',
   relief_regions_empty: 'กดสร้างงานนูนก่อน แล้วแต่ละสีในรูปจะมีรูปทรงของตัวเองที่นี่',
   relief_status_empty: 'เลือกรูป ตั้งขนาด แล้วกดสร้างงานนูน', picture_and_size: 'รูปและขนาด',
+  // G-code simulator
+  sim_open: 'จำลอง', sim_title: 'จำลอง G-code', sim_loading: 'กำลังโหลดไฟล์…', sim_parsing: 'กำลังอ่าน G-code… {p} %',
+  sim_err_load: 'เปิดไฟล์ไม่ได้', sim_play: 'เล่น', sim_pause: 'หยุดชั่วคราว', sim_prev: 'คำสั่งก่อนหน้า', sim_next: 'คำสั่งถัดไป',
+  sim_scrub: 'ตำแหน่งในโปรแกรม', sim_speed: 'ความเร็ว', sim_view_3d: 'มุมมอง 3D', sim_view_top: 'มุมมองด้านบน', sim_fit: 'พอดีจอ (0)',
+  sim_totals: 'สรุป', sim_warnings: 'การตรวจสอบ', sim_lines: 'จำนวนบรรทัด', sim_moves: 'จำนวนการเคลื่อนที่', sim_cut: 'ระยะตัด',
+  sim_rapid: 'ระยะเดินเปล่า', sim_time: 'เวลาโดยประมาณ', sim_zmin: 'Z ลึกสุด', sim_area: 'พื้นที่ตัด', sim_expect: 'ความลึกที่ควรเป็น',
+  sim_line: 'บรรทัด', sim_rapid_move: 'เดินเปล่า', sim_above: 'ตัดเหนือ Z0', sim_zx: 'แสดง Z ×{k}',
+  sim_no_warnings: 'ไม่พบปัญหา',
+  simw_too_deep: '{n} การเคลื่อนที่ลึกเกินกำหนด: Z {z} (ควรเป็น {e} mm)',
+  simw_outside: '{n} การเคลื่อนที่ออกนอกแผ่นวัสดุ',
+  simw_air_cut: '{n} การเดินตัดเหนือ Z0 โดยไม่ได้กดดอกลง (ตัดอากาศ)',
+  simw_no_m30: 'ไฟล์ไม่ได้จบด้วย M30',
+  simw_spindle_off: '{n} การตัดต่ำกว่า Z0 ขณะสปินเดิลปิด (ไม่มี M3)',
+  simw_no_feed: '{n} การเดินตัดที่ไม่มีค่าฟีด F',
+  simw_bad_arc: '{n} ส่วนโค้งที่รัศมีไม่ตรงกับจุดปลาย',
+  simw_plane: '{n} บรรทัดใช้ระนาบโค้งที่ไม่ใช่ XY (G17)',
+  simw_tool_change: '{n} คำสั่งเปลี่ยนดอก M06: เครื่องไม่มีตัวเปลี่ยนดอกอัตโนมัติ',
+  simw_after_end: '{n} การเคลื่อนที่หลัง M30 ถูกข้าม',
+  simw_unsupported: '{n} บรรทัดมี G-code ที่ตัวจำลองไม่รู้จัก ({word})',
 };
 
 const DICTS = { en, th };

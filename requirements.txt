@@ -6,6 +6,7 @@ shapely>=2.0
 pyclipper
 ezdxf
 svgelements
+pymupdf
 fastapi
 uvicorn[standard]
 sqlalchemy>=2.0
