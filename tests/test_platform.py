@@ -270,7 +270,8 @@ def test_backup_then_restore_gives_identical_jobs(client, tmp_path):
     with zipfile.ZipFile(info["path"]) as z:
         names = set(z.namelist())
     assert "nest.db" in names and not any(n.startswith("logs/") for n in names)
-    assert all(f"jobs/{job['id']}/{f['name']}" in names for f in job["exports"])
+    assert all(any(n.startswith(f"jobs/{job['id']}/") and n.endswith("/" + f["name"]) for n in names)
+               for f in job["exports"])
 
     dest = str(tmp_path / "restored")
     backup_mod.restore(info["path"], dest)
@@ -344,6 +345,13 @@ def test_log_rotation_settings(client):
 
 # ---------- 3.5 clean-up ----------
 
+def _find(folder, name):
+    for root, _dirs, files in os.walk(folder):
+        if name in files:
+            return os.path.join(root, name)
+    raise FileNotFoundError(name)
+
+
 def _age(path, days):
     t = time.time() - days * 86400
     os.utime(path, (t, t))
@@ -355,7 +363,7 @@ def test_cleanup_old_files_but_not_cut_jobs(client):
     assert client.post(f"/api/jobs/{cut['id']}/commit").status_code == 200
     for j in (old, cut):
         for f in j["exports"]:
-            _age(os.path.join(sv.job_dir(client.data_dir, j["id"]), f["name"]), 100)
+            _age(_find(sv.job_dir(client.data_dir, j["id"]), f["name"]), 100)
     out = maintenance.clean_old_files(client.db)
     assert out["export_files"] == len(old["exports"])
     o = client.get(f"/api/jobs/{old['id']}").json()

@@ -183,5 +183,6 @@ def test_export_revisions_increment_and_old_files_remain(client):
     assert client.get(f1["url"]).status_code == 200
     assert client.post(f"/api/jobs/{jid}/export", json={"target": "ruida"}).json()["revision"] == 5
     # deleting the job removes every revision
-    assert client.delete(f"/api/jobs/{jid}").status_code == 204
+    assert client.delete(f"/api/jobs/{jid}").status_code == 204          # to the bin
+    assert client.delete(f"/api/jobs/{jid}?purge=1").status_code == 204
     assert not os.path.exists(folder)

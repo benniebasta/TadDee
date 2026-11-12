@@ -56,7 +56,8 @@ Rule: only edit files you own. If you need something from another module, code a
 ### 4.1 Shared types (`core/models.py`, done, read it)
 `Part`, `SheetSpec`, `NestSettings`, `Placement`, `SheetResult`, `NestResult`, `place()`, `placed_part()`.
 - Units mm, Y up. A `Part.shape` is ONE valid shapely `Polygon` (holes allowed) normalised to `bounds[0:2] == (0, 0)`.
-- A placement means: rotate the part about (0,0) by `rotation` degrees CCW, then translate by `(x, y)`. Always call `core.models.place()`; never re-implement it.
+- A placement means: if `mirror`, flip x -> -x about (0,0); rotate the part about (0,0) by `rotation` degrees CCW, then translate by `(x, y)`. Always call `core.models.place()` / `placed_part()`; never re-implement it.
+- Part 2 fields: `Part.mirror`, `Part.color` ("#rrggbb", SVG fill else stroke, DXF true/ACI colour), `Placement.mirror`, `NestSettings.separate_colors`, `NestSettings.max_grid_cells` (12 M), `NestResult.meta` (resolution_mm used, resolution_requested, rotations, stopped done|time|cancel|exhausted, complete, separate_colors).
 - Sheet frame: (0,0) bottom-left, X along the sheet width (the long side when the user enters 2440 x 1220 as width x height).
 
 ### 4.2 Importers (`core/importers.py`)
@@ -109,6 +110,8 @@ Algorithm (raster no-fit placement, bottom-left-fill with gravity to -X):
 10. `NestResult.utilisation` = total used area / total area of sheets in the result. Report `attempts`.
 
 Performance target: 60 part instances on a 2440 x 1220 sheet, r = 2 mm, finishes the first attempt in < 5 s on a laptop. Cache kernels per (part, rotation). Use `numpy` float32.
+
+Part 2 engine (2.1/2.3/2.4/2.5): `nest(parts, sheets, settings, *, progress=None, should_stop=None)`; `progress(fraction, best_summary)` about 4x a second and once with 1.0; `should_stop()` polled between rotations (cancel within one FFT, < 1 s); best finished layout kept; cancel during the first layout returns the partial layout (`meta.complete = False`). The first layout ignores the time limit (a result always exists); later attempts stop at it. The sheet grid is capped at 12 M cells: 0.5 mm works on 2440 x 1220, 0.25 mm only on sheets up to about 0.75 m² (offcuts, laser bed parts); finer requests are coarsened and reported in `meta`. Occupancy FFT shared by all rotations, kernel FFTs in a 256 MB LRU; with more than 4 rotations on a grid finer than 2 mm, rotations are ranked on a pooled 2 mm grid and the best 4 searched fine. Measured (4-core container, 60 mixed instances, first layout): 2 mm/4 rot 0.9 s; 2 mm/36 rot 6.6 s; 1 mm/36 rot 13-15 s; 0.5 mm/4 rot 13-15 s (peak RSS 0.9 GB); 0.5 mm/36 rot 33-45 s (peak RSS 1.3-1.5 GB).
 
 ### 4.5 2D CAM (`cam/`)
 ```python
@@ -185,6 +188,11 @@ Errors: `{"detail": "<plain sentence>", "code": "<code>", "message": "<same sent
 | GET/POST `/materials`, PUT/DELETE `/materials/{id}` | `{name, thickness_mm, sheet_w, sheet_h, price_per_sheet, margin_mm}` | material |
 | GET `/offcuts?material_id=` , DELETE `/offcuts/{id}` | | `[{id, material_id, width, height, outline_wkt, source_job_id, created_at, used}]` |
 | GET `/jobs?bin=` | | `[{id, name, material, machine, status, sheets, utilisation, created_at, deleted_at, purge_at}]` newest first; `bin=1` lists the bin |
+| GET/POST `/materials`, PUT/DELETE `/materials/{id}` | `{name, thickness_mm, sheet_w, sheet_h, price_per_sheet, margin_mm, grain}` (grain: nest turns parts 0/180 only, whatever was asked) | material |
+| GET `/offcuts?material_id=` , DELETE `/offcuts/{id}` | | `[{id, material_id, width, height, outline_wkt, source_job_id, created_at, used, name, irregular, holes}]` |
+| POST `/offcuts` | `{material_id, width, height, name?}` | offcut (rectangular remnant typed in) |
+| POST `/offcuts/upload` | multipart `file` (SVG/DXF) + form `material_id` | offcut + `warnings`; largest closed shape = outline, its holes = missing material |
+| GET `/jobs` | | `[{id, name, material, machine, status, sheets, utilisation, created_at}]` newest first |
 | POST `/jobs` | `{name, material_id, machine_id}` | job detail |
 | GET `/jobs/{id}` | | `{id, name, material, machine, status, parts: [PartOut], settings, nest: NestOut\|null, exports: [FileOut]}` |
 | PATCH `/jobs/{id}` | any of `{name, material_id, machine_id}` | job detail |
@@ -193,9 +201,10 @@ Errors: `{"detail": "<plain sentence>", "code": "<code>", "message": "<same sent
 | POST `/jobs/{id}/duplicate` | | 201 job detail: new draft job, same material/machine/parts/nest settings, no nest or files |
 | POST `/jobs/{id}/unlock` | | job detail: undoes "Mark as cut" (its unused saved offcuts are removed, used ones freed); 409 if not cut |
 | POST `/jobs/{id}/files` | multipart `file` (one or more) | `{parts: [PartOut], warnings: []}` (appended to the job) |
-| PATCH `/jobs/{id}/parts/{part_id}` | `{qty?, name?, mark_layer?}` (qty 0..999) | PartOut |
+| PATCH `/jobs/{id}/parts/{part_id}` | `{qty?, name?, mark_layer?, mirror?}` (qty 0..999) | PartOut |
 | DELETE `/jobs/{id}/parts/{part_id}` | | 204 |
 | POST `/jobs/{id}/nest?async=` | `{gap_mm?, rotations?, allow_in_holes?, resolution_mm?, time_limit_s? (max 60), seed?, use_offcuts?, margin_mm?, sheet_w?, sheet_h?}` | NestOut; `async=1`: 202 Task (bad input is still a 400 at once); 409 `task_busy` while this job is nesting |
+| POST `/jobs/{id}/nest` | `{gap_mm?, rotations?, allow_in_holes?, resolution_mm? (0.25..20), time_limit_s? (max 300), seed?, use_offcuts?, margin_mm?, sheet_w?, sheet_h?, sets? (1..100), separate_colors?, preset?}` | NestOut. `services.run_nest(..., progress=, should_stop=)` passes both to the engine for a background runner |
 | POST `/jobs/{id}/export` | `{target: "ncstudio"\|"ruida", cut_tool_id?, mark_tool_id?, cam?: {CamSettings fields minus thickness}, kerf_mm?}` | `{files: [FileOut], warnings: []}` (replaces earlier exports of the same target) |
 | GET `/jobs/{id}/files/{name}` | | the file (download) |
 | GET `/jobs/{id}/export.zip` | | zip of all exports |
@@ -209,8 +218,9 @@ Errors: `{"detail": "<plain sentence>", "code": "<code>", "message": "<same sent
 | POST `/admin/backup` | | backup now (same as `python -m app.backup`) |
 | GET `/relief/{id}/files/{name}` | | file |
 
-`PartOut = {id, name, qty, width, height, area_mm2, holes, marks, mark_layer, source, svg}` (svg = `part_svg`).
-`NestOut = {sheets: [{index, sheet_id, width, height, is_offcut, utilisation, parts_count, svg, offcut: {width, height}|null}], unplaced: [{part_id, name, count}], utilisation, sheets_used, attempts, elapsed_s, cost: {sheets_thb, machine_thb, total_thb, cut_minutes, vat_included: false}}`. Cost: sheets_thb = full sheets used x material price (offcuts count 0); cut_minutes = sum of outside+inside perimeters x passes / cut tool feed (rough estimate before export); machine_thb = cut_minutes / 60 x machine rate.
+`PartOut = {id, name, qty, width, height, area_mm2, holes, marks, mark_layer, source, svg, mirror, color}` (svg = `part_svg`).
+`NestOut = {sheets: [{index, sheet_id, width, height, is_offcut, utilisation, parts_count, svg, offcut: {width, height}|null}], unplaced: [{part_id, name, count}], utilisation, sheets_used, attempts, elapsed_s, cost: {sheets_thb, machine_thb, total_thb, cut_minutes, vat_included: false}, meta: {resolution_mm, resolution_requested, rotations, rotations_requested, grain_locked, stopped, complete, time_limit_s, sets, separate_colors}}`. Sets: every part qty x sets goes to the engine; qty stays per set; unplaced counts are totals.
+New columns (materials.grain, job_parts.mirror/color, offcuts.name) are added to older SQLite files at start by `db.add_missing_columns` (add-only) until Alembic (3.2) takes over. Cost: sheets_thb = full sheets used x material price (offcuts count 0); cut_minutes = sum of outside+inside perimeters x passes / cut tool feed (rough estimate before export); machine_thb = cut_minutes / 60 x machine rate.
 `FileOut = {name, url, size, minutes?, tool?}`.
 `Task = {id, task_id, kind: nest|relief, job_id, ref, status: queued|running|done|failed|cancelled, progress 0..1, message, result, created_at, started_at, finished_at}` (`result` of a nest: `{job_id, sheets_used, utilisation, unplaced, elapsed_s}`; of a relief: `{relief_id}`; of a failure: `{code, status}`).
 A job marked `cut` is locked: upload, part edits, nest, export and material/machine changes answer 409 `job_locked` until `/unlock`. Jobs in the bin answer 404 except restore and purge.

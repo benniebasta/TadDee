@@ -64,6 +64,7 @@ class _Piece:
     pts: list[tuple[float, float]]
     closed: bool
     layer: str = "engrave"      # only used for open lines: engrave | score
+    color: str = ""             # "#rrggbb" of the artwork (SVG fill, else stroke; DXF entity colour)
 
 
 # ----------------------------------------------------------------------------
@@ -149,6 +150,7 @@ def _svg_shape_pieces(el, tol_px: float, px_to_mm: float) -> list[_Piece]:
     if not has_fill and not has_stroke:
         return []
     layer = "score" if has_stroke and el.stroke.hex[:7].lower() == SCORE_BLUE else "engrave"
+    color = (el.fill.hex if has_fill else el.stroke.hex)[:7].lower()
     path = abs(se.Path(el))     # abs() = copy with all transforms applied (reify)
     out = []
     for sub in path.as_subpaths():
@@ -160,7 +162,7 @@ def _svg_shape_pieces(el, tol_px: float, px_to_mm: float) -> list[_Piece]:
         if not closed and has_fill and not has_stroke and len(pts) >= 3:
             closed = True
         mm = [(x * px_to_mm, -y * px_to_mm) for x, y in pts]   # px -> mm, flip Y up
-        out.append(_Piece(mm, closed, layer))
+        out.append(_Piece(mm, closed, layer, color))
     return out
 
 
@@ -260,6 +262,7 @@ def _read_dxf(data: bytes, tol_mm: float, default_units: str,
             continue
         piece = _dxf_entity_piece(ent, tol_mm / scale, scale)
         if piece is not None:
+            piece.color = _dxf_color(ent, doc)
             pieces.append(piece)
     if texts:
         warnings.append(f"{texts} text item(s) skipped: text must be converted to outlines")
@@ -308,6 +311,28 @@ def _dxf_entity_piece(ent, tol_units: float, scale: float) -> _Piece | None:
                   or (ent.dxftype() == "ELLIPSE" and _ellipse_is_full(ent))
                   or (ent.dxftype() == "SPLINE" and ent.closed))
     return _Piece(pts, closed)
+
+
+def _dxf_color(ent, doc) -> str:
+    """"#rrggbb" of a DXF entity: its true colour, else its ACI colour
+    (BYLAYER resolved through the layer table); "" when unknown."""
+    from ezdxf import colors
+
+    try:
+        tc = ent.dxf.get("true_color")
+        if tc is not None:
+            r, g, b = colors.int2rgb(tc)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        aci = int(ent.dxf.get("color", 256))
+        if aci == 256:                      # BYLAYER
+            layer = doc.layers.get(ent.dxf.get("layer", "0"))
+            aci = abs(int(layer.dxf.get("color", 7))) if layer is not None else 7
+        if aci <= 0 or aci > 255:           # BYBLOCK / unknown
+            return ""
+        r, g, b = colors.aci2rgb(aci)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return ""
 
 
 def _ellipse_is_full(ent) -> bool:
@@ -531,12 +556,13 @@ def _join_chains(pieces: list[_Piece]) -> list[_Piece]:
                 break
             chain.reverse()
         is_closed = len(chain) >= 4 and _close_enough(chain[0], chain[-1])
-        closed.append(_Piece(chain, is_closed, piece.layer))
+        closed.append(_Piece(chain, is_closed, piece.layer, piece.color))
     return closed
 
 
-def _rings_to_polygons(rings: list[_Piece]) -> list[Polygon]:
-    """Make valid filled polygons (outer edge only) from closed rings; drop dust."""
+def _rings_to_polygons(rings: list[_Piece], colors: list[str] | None = None) -> list[Polygon]:
+    """Make valid filled polygons (outer edge only) from closed rings; drop dust.
+    If `colors` is given, the colour of each returned polygon's ring is appended to it."""
     polys: list[Polygon] = []
     for r in rings:
         if len(r.pts) < 3:
@@ -544,9 +570,14 @@ def _rings_to_polygons(rings: list[_Piece]) -> list[Polygon]:
         geom = make_valid(Polygon(r.pts))
         for g in getattr(geom, "geoms", [geom]):
             if isinstance(g, Polygon) and g.area >= MIN_RING_AREA_MM2:
-                polys.append(Polygon(g.exterior))
+                found = [Polygon(g.exterior)]
             elif isinstance(g, MultiPolygon):
-                polys.extend(Polygon(q.exterior) for q in g.geoms if q.area >= MIN_RING_AREA_MM2)
+                found = [Polygon(q.exterior) for q in g.geoms if q.area >= MIN_RING_AREA_MM2]
+            else:
+                found = []
+            polys.extend(found)
+            if colors is not None:
+                colors.extend([r.color] * len(found))
     return polys
 
 
@@ -560,13 +591,18 @@ def _inside(inner: Polygon, outer: Polygon) -> bool:
     return outer.intersection(inner).area > 0.99 * inner.area
 
 
-def _group_rings(polys: list[Polygon]) -> list[Polygon]:
+def _group_rings(polys: list[Polygon], colors: list[str] | None = None,
+                 out_colors: list[str] | None = None) -> list[Polygon]:
     """Turn nested rings into part polygons by containment depth.
 
     Sorted big to small, each ring's parent is the smallest bigger ring that holds it.
     Even depth = outer edge of a part; odd depth = a hole of its parent.
+    With `colors` (one per ring), each part's outer-ring colour goes to `out_colors`.
     """
-    polys = sorted(polys, key=lambda p: p.area, reverse=True)
+    cols = list(colors) if colors is not None and len(colors) == len(polys) else [""] * len(polys)
+    order = sorted(range(len(polys)), key=lambda k: polys[k].area, reverse=True)
+    polys = [polys[k] for k in order]
+    cols = [cols[k] for k in order]
     depth = [0] * len(polys)
     parent = [-1] * len(polys)
     tree = STRtree(polys)                       # only rings whose box touches p can hold it
@@ -586,6 +622,8 @@ def _group_rings(polys: list[Polygon]) -> list[Polygon]:
         for g in getattr(shape, "geoms", [shape]):   # overlapping holes may split a part
             if isinstance(g, Polygon) and g.area >= MIN_RING_AREA_MM2:
                 shapes.append(orient(g, 1.0))
+                if out_colors is not None:
+                    out_colors.append(cols[i])
     return shapes
 
 
@@ -657,7 +695,12 @@ def _build_parts(pieces: list[_Piece], stem: str, source: str, warnings: list[st
     joined = _join_chains(pieces)
     rings = [p for p in joined if p.closed]
     lines = [p for p in joined if not p.closed]
-    shapes = _reading_order(_group_rings(_rings_to_polygons(rings)))
+    ring_colors: list[str] = []
+    polys = _rings_to_polygons(rings, ring_colors)
+    part_colors: list[str] = []
+    grouped = _group_rings(polys, ring_colors, part_colors)
+    color_of = {id(g): c for g, c in zip(grouped, part_colors)}
+    shapes = _reading_order(grouped)
     marks = _assign_marks(lines, shapes, warnings)
     parts: list[Part] = []
     for n, shape in enumerate(shapes):
@@ -672,6 +715,7 @@ def _build_parts(pieces: list[_Piece], stem: str, source: str, warnings: list[st
             marks=[affinity.translate(m, dx, dy) for m, _ in my],
             mark_layer=_mark_layer(my, name, warnings) if my else "engrave",
             source=source,
+            color=color_of.get(id(shape), ""),
         ))
     return parts
 

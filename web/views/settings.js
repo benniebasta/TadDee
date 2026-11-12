@@ -51,12 +51,14 @@ const ENTITIES = [
       { name: 'sheet_h', id: 'sheet-h', label: 'sheet_h', type: 'number', def: 1220 },
       { name: 'margin_mm', id: 'margin', label: 'margin_mm', type: 'number', def: 10, step: '0.5' },
       { name: 'price_per_sheet', id: 'price', label: 'price_per_sheet', type: 'number', def: 0, step: '0.01', hint: 'price_hint' },
+      { name: 'grain', id: 'grain', label: 'grain', type: 'checkbox', def: false, hint: 'grain_hint' },
     ],
     cols: [
       ['name', (x) => x.name], ['thickness_mm', (x) => num(x.thickness_mm, 2), 'num'],
       ['sheet_mm', (x) => `${num(x.sheet_w)} × ${num(x.sheet_h)}`, 'num'], ['margin_mm', (x) => num(x.margin_mm, 1), 'num'],
       ['price_per_sheet', (x) => (Number(x.price_per_sheet) ? money(x.price_per_sheet)
         : h('span', { class: 'badge warn' }, t('set_price_short'))), 'num'],
+      ['grain', (x) => (x.grain ? h('span', { class: 'badge', testid: 'material-grain-badge' }, t('grain_badge')) : '')],
     ],
   },
 ];
@@ -133,7 +135,11 @@ function editor(E) {
       const val = it ? it[f.name] ?? '' : f.def;
       let c;
       if (f.type === 'select') c = select({ testid: `${E.key}-${f.id}` }, f.options(), val);
-      else c = h('input', { type: f.type, testid: `${E.key}-${f.id}`, value: String(val ?? ''), step: f.step || 'any',
+      else if (f.type === 'checkbox') {
+        c = h('input', { type: 'checkbox', testid: `${E.key}-${f.id}`, checked: Boolean(val) });
+        inputs[f.name] = c;
+        return h('label', { class: 'check' }, c, t(f.label), f.hint ? h('span', { class: 'muted small' }, ` · ${t(f.hint)}`) : null);
+      } else c = h('input', { type: f.type, testid: `${E.key}-${f.id}`, value: String(val ?? ''), step: f.step || 'any',
         min: f.type === 'number' ? '0' : undefined, inputmode: f.type === 'number' ? 'decimal' : undefined, autocomplete: 'off' });
       inputs[f.name] = c;
       return field(t(f.label), c, f.hint ? t(f.hint) : undefined);
@@ -144,6 +150,7 @@ function editor(E) {
       busy(save, async () => {
         const body = {};
         for (const f of E.fields) {
+          if (f.type === 'checkbox') { body[f.name] = Boolean(inputs[f.name].checked); continue; }
           const raw = String(inputs[f.name].value).trim();
           if (f.type === 'number') {
             if (raw === '') { if (f.nullable) { body[f.name] = null; continue; } throw new Error(t('err_required', { f: t(f.label) })); }

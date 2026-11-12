@@ -119,6 +119,7 @@ class MaterialIn(_In):
     sheet_h: float = Field(gt=0)
     price_per_sheet: float = Field(default=0, ge=0)
     margin_mm: float = Field(default=10, ge=0)
+    grain: bool = False           # grain or brushed finish: parts turn 0/180 only
 
 
 class MaterialUpdate(_In):
@@ -128,6 +129,7 @@ class MaterialUpdate(_In):
     sheet_h: float | None = Field(default=None, gt=0)
     price_per_sheet: float | None = Field(default=None, ge=0)
     margin_mm: float | None = Field(default=None, ge=0)
+    grain: bool | None = None
 
 
 class MaterialOut(BaseModel):
@@ -138,6 +140,7 @@ class MaterialOut(BaseModel):
     sheet_h: float
     price_per_sheet: float
     margin_mm: float
+    grain: bool = False
 
 
 class OffcutOut(BaseModel):
@@ -149,6 +152,21 @@ class OffcutOut(BaseModel):
     source_job_id: int | None
     created_at: str
     used: bool
+    name: str = ""
+    irregular: bool = False       # outline is not a plain rectangle (drawn remnant)
+    holes: int = 0                # missing pieces inside the outline
+
+
+class OffcutUploadOut(OffcutOut):
+    warnings: list[str] = []
+
+
+class OffcutCreate(_In):
+    """A rectangular remnant typed in by size (phone)."""
+    material_id: int
+    width: float = Field(gt=0, le=20000)
+    height: float = Field(gt=0, le=20000)
+    name: str = Field(default="", max_length=200)
 
 
 # ---------- jobs ----------
@@ -192,12 +210,15 @@ class PartOut(BaseModel):
     mark_layer: str
     source: str
     svg: str
+    mirror: bool = False          # cut flipped left-right
+    color: str = ""               # "#rrggbb" from the artwork, "" = unknown
 
 
 class PartUpdate(_In):
     qty: int | None = Field(default=None, ge=0, le=999)
     name: str | None = Field(default=None, min_length=1, max_length=200)
     mark_layer: Literal["score", "engrave"] | None = None
+    mirror: bool | None = None
 
 
 class UploadOut(BaseModel):
@@ -210,12 +231,15 @@ class NestIn(_In):
     rotations: list[float] | None = None
     allow_in_holes: bool | None = None
     resolution_mm: float | None = Field(default=None, ge=0.25, le=20)
-    time_limit_s: float | None = Field(default=None, ge=0)      # capped at 60 by the server
+    time_limit_s: float | None = Field(default=None, ge=0)      # capped at 300 by the server
     seed: int | None = None
     use_offcuts: bool | None = None
     margin_mm: float | None = Field(default=None, ge=0, le=500)
     sheet_w: float | None = Field(default=None, gt=0, le=20000)
     sheet_h: float | None = Field(default=None, gt=0, le=20000)
+    sets: int | None = Field(default=None, ge=1, le=100)        # every part qty x sets (qty stays per set)
+    separate_colors: bool | None = None                         # parts of different colours never share a sheet
+    preset: str | None = Field(default=None, max_length=40)     # UI preset name, stored for display only
 
 
 class NestSettingsOut(BaseModel):
@@ -230,6 +254,9 @@ class NestSettingsOut(BaseModel):
     margin_mm: float
     sheet_w: float | None
     sheet_h: float | None
+    sets: int = 1
+    separate_colors: bool = False
+    preset: str | None = None
 
 
 class OffcutSize(BaseModel):
@@ -263,6 +290,20 @@ class CostOut(BaseModel):
     vat_included: bool = False
 
 
+class NestMeta(BaseModel):
+    """How the nest ran, so the UI can explain it."""
+    resolution_mm: float | None = None          # cell size really used (coarsened on big sheets)
+    resolution_requested: float | None = None
+    rotations: list[float] = []                 # angles really tried
+    rotations_requested: list[float] = []
+    grain_locked: bool = False                  # material has grain: rotations cut down to 0/180
+    stopped: str = "done"                       # done | time | cancel | exhausted
+    complete: bool = True                       # False: cancelled during the first layout
+    time_limit_s: float | None = None
+    sets: int = 1
+    separate_colors: bool = False
+
+
 class NestOut(BaseModel):
     sheets: list[SheetOut]
     unplaced: list[UnplacedOut]
@@ -271,6 +312,7 @@ class NestOut(BaseModel):
     attempts: int
     elapsed_s: float
     cost: CostOut
+    meta: NestMeta = NestMeta()
 
 
 class FileOut(BaseModel):

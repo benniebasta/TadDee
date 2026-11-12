@@ -34,14 +34,32 @@ How it works, in plain words:
    wins. The first attempt is always plain biggest-first, so time_limit_s=0
    still gives a result. Same input + same seed = same output.
 9. Each sheet reports used area, utilisation and a reusable offcut strip.
+
+Production additions (PLAN.md Part 2):
+- Part.mirror: the part is flipped (x -> -x) before rotating; the Placement
+  carries mirror=True so CAM and previews draw it flipped too.
+- settings.separate_colors: a sheet takes only parts of the colour of the
+  first part placed on it (Part.color), so colours never share a sheet.
+- Fine resolutions are coarsened so one sheet grid has at most
+  settings.max_grid_cells cells (12 M: 0.5 mm on 2440 x 1220); the used
+  resolution is reported in NestResult.meta.
+- nest(..., progress=, should_stop=): progress(fraction 0..1, best summary)
+  is called now and then; should_stop() is polled between rotations, so a
+  cancel stops within one FFT (well under a second). The best finished layout
+  is kept. A cancel during the very first layout returns what was placed so
+  far, the rest as unplaced (meta["complete"] = False).
+- Occupancy FFTs are shared by all rotations of one instance and kernel FFTs
+  are cached (LRU, bounded bytes), so many rotations cost about one inverse
+  FFT each.
 """
 from __future__ import annotations
 
 import math
 import random
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 import shapely
@@ -56,7 +74,7 @@ from shapely.strtree import STRtree
 
 from core.models import NestResult, NestSettings, Part, Placement, SheetResult, SheetSpec, place
 
-__all__ = ["nest", "validate", "placed_shape", "sheet_container"]
+__all__ = ["nest", "validate", "placed_shape", "sheet_container", "effective_resolution"]
 
 # Tolerances (mm). The exact check during nesting is a little stricter than
 # validate(), so whatever the engine accepts always passes validate().
@@ -72,13 +90,35 @@ def _engine_tol(gap: float) -> float:
     return (gap / 2) * (1 - math.cos(math.pi / (4 * _QUAD_SEGS))) + 0.001
 _MAX_EXACT_FAILS = 400          # per instance per sheet, then the sheet counts as full for it
 _STALE_ORDERS_STOP = 60         # stop improving after this many repeated orders in a row
+_KFFT_BUDGET = 256 * 1024 * 1024   # bytes of cached kernel FFTs
+_WIN_STEP_MM = 120.0            # search windows grow in steps of this many mm (kernel FFT cache reuse)
+_PROGRESS_EVERY_S = 0.25
+_PRUNE_CELL_MM = 2.0            # coarse cell used to rank many rotations on a fine grid
+_PRUNE_KEEP = 4                 # rotations searched on the fine grid after ranking
+
+
+class _Stopped(Exception):
+    """should_stop() said yes in the middle of an attempt."""
+
+
+def effective_resolution(requested: float, sheets: list[SheetSpec], max_cells: int) -> float:
+    """The cell size the engine really uses: the requested one, made coarser
+    (in 0.05 mm steps) when the biggest sheet would need more than max_cells."""
+    r = float(requested) if requested and requested > 0 else 2.0
+    if max_cells and max_cells > 0 and sheets:
+        area = max((s.polygon().bounds[2] - s.polygon().bounds[0]) * (s.polygon().bounds[3] - s.polygon().bounds[1])
+                   for s in sheets)
+        need = math.sqrt(area / max_cells) if area > 0 else 0.0
+        if need > r:
+            r = math.ceil(need / 0.05 - 1e-9) * 0.05
+    return round(r, 4)
 
 
 # --------------------------------------------------------------------------- helpers others may use
 
 def placed_shape(part: Part, pl: Placement) -> Polygon:
     """The real part polygon at its placement (thin wrapper over core.models.place)."""
-    return place(part.shape, pl.rotation, pl.x, pl.y)
+    return place(part.shape, pl.rotation, pl.x, pl.y, bool(getattr(pl, "mirror", False)))
 
 
 def sheet_container(spec: SheetSpec) -> BaseGeometry:
@@ -124,6 +164,7 @@ def _raster(geom: BaseGeometry, x0: float, y0: float, r: float, nx: int, ny: int
 class _Shape:
     part_id: str
     rotation: float
+    mirror: bool
     order: int                  # index of the rotation in settings.rotations (tie-break)
     bx: float                   # bounds of the rotated, inflated shape before normalising
     by: float
@@ -139,11 +180,22 @@ class _Shape:
 class _Context:
     """Everything that stays the same for one nest() call: kernels, sheet grids."""
 
-    def __init__(self, parts: dict[str, Part], specs: list[SheetSpec], st: NestSettings):
+    def __init__(self, parts: dict[str, Part], specs: list[SheetSpec], st: NestSettings,
+                 should_stop: Callable[[], bool] | None = None):
         self.parts = parts
         self.specs = specs
         self.gap = max(0.0, float(st.gap_mm))
-        self.r = float(st.resolution_mm) if st.resolution_mm and st.resolution_mm > 0 else 2.0
+        self.r_requested = float(st.resolution_mm) if st.resolution_mm and st.resolution_mm > 0 else 2.0
+        self.r = effective_resolution(self.r_requested, specs, int(getattr(st, "max_grid_cells", 0) or 0))
+        self.separate = bool(getattr(st, "separate_colors", False))
+        self.should_stop = should_stop
+        self.deadline = math.inf            # perf_counter time after which later attempts give up
+        self._kfft: OrderedDict = OrderedDict()
+        self._kfft_bytes = 0
+        # coarse pre-ranking of rotations: pool fine cells into ~2 mm cells
+        self.pool_f = max(1, int(round(_PRUNE_CELL_MM / self.r)))
+        self._coarse: dict[tuple[str, int], np.ndarray] = {}
+
         self.holes = bool(st.allow_in_holes)
         self.tol = _engine_tol(self.gap)
         rots: list[float] = []
@@ -156,25 +208,61 @@ class _Context:
         self._bases: dict[int, _SheetBase | None] = {}
         self.never_fits: set[tuple[str, int]] = set()   # (part id, spec index): does not fit even an empty sheet
 
+    def coarse_kernel(self, s: "_Shape") -> np.ndarray:
+        key = (s.part_id, s.order)
+        k = self._coarse.get(key)
+        if k is None:
+            raw = s.kernel[::-1, ::-1] > 0.5          # back to the unflipped kernel
+            k = np.ascontiguousarray(_pool(raw, self.pool_f, False)[::-1, ::-1], dtype=np.float32)
+            self._coarse[key] = k
+        return k
+
+    def color(self, pid: str) -> str:
+        return (self.parts[pid].color or "").lower()
+
+    def check_stop(self, first: bool) -> None:
+        """Raise _Stopped on cancel (any attempt) or, after the first attempt, on time."""
+        if self.should_stop is not None and self.should_stop():
+            raise _Stopped("cancel")
+        if not first and time.perf_counter() > self.deadline:
+            raise _Stopped("time")
+
+    def kernel_fft(self, key: tuple, kernel: np.ndarray, fshape: tuple[int, int]) -> np.ndarray:
+        key = key + (fshape,)
+        f = self._kfft.get(key)
+        if f is not None:
+            self._kfft.move_to_end(key)
+            return f
+        with sp_fft.set_workers(-1):
+            f = sp_fft.rfft2(kernel, s=fshape)
+        self._kfft[key] = f
+        self._kfft_bytes += f.nbytes
+        while self._kfft_bytes > _KFFT_BUDGET and len(self._kfft) > 1:
+            _, old = self._kfft.popitem(last=False)
+            self._kfft_bytes -= old.nbytes
+        return f
+
     # Kernels are cached per (part id, rotation). Rotations that give the same
     # inflated shape (a rectangle at 0 and 180) are tried only once.
     def shapes(self, pid: str) -> list[_Shape]:
         if pid in self._shapes:
             return self._shapes[pid]
         part = self.parts[pid]
+        mirror = bool(part.mirror)
         out: list[_Shape] = []
         r = self.r
         for k, rot in enumerate(self.rotations):
-            rotated = place(part.shape, rot, 0, 0)
+            rotated = place(part.shape, rot, 0, 0, mirror)
             infl = (rotated.buffer(self.gap / 2, join_style="round", quad_segs=_QUAD_SEGS)
                     if self.gap > 0 else rotated)
             if not isinstance(infl, Polygon):     # buffer of one valid polygon is one polygon; be safe
                 infl = max(_polys(infl), key=lambda g: g.area)
             bx, by, mx, my = infl.bounds
             norm = affinity.translate(infl, -bx, -by)
-            if any(s.inflated.symmetric_difference(norm).area < 0.5 for s in out):
-                continue
             w, h = mx - bx, my - by
+            if any(abs(s.w - w) < 0.5 and abs(s.h - h) < 0.5 and s.inflated.symmetric_difference(norm).area < 0.5
+                   for s in out):
+                continue
             cw, ch = int(math.ceil(w / r - 1e-9)) + 2, int(math.ceil(h / r - 1e-9)) + 2
             # Bigger than every sheet grid: it can never be placed, so do not draw it
             # (a drawing read in the wrong units can be tens of metres: GBs of grid).
@@ -185,7 +273,7 @@ class _Context:
             ker = binary_dilation(raw, structure=np.ones((3, 3), bool))
             ncells = int(ker.sum())
             dtype = np.float32 if ncells < 200_000 else np.float64
-            out.append(_Shape(pid, rot, k, bx, by, w, h, norm, np.ascontiguousarray(ker[::-1, ::-1], dtype=dtype),
+            out.append(_Shape(pid, rot, mirror, k, bx, by, w, h, norm, np.ascontiguousarray(ker[::-1, ::-1], dtype=dtype),
                               ch, cw, ncells))
         self._shapes[pid] = out
         return out
@@ -249,6 +337,7 @@ class _Grid:
         self.items: list[tuple[str, int, _Shape, float, float]] = []   # pid, copy, shape, X, Y (inflated origin)
         self.true: list[Polygon] = []
         self.bounds = np.zeros((0, 4))
+        self.color: str | None = None           # with separate_colors: the colour this sheet takes
 
     @property
     def empty(self) -> bool:
@@ -280,6 +369,86 @@ def _free_map(grid: _Grid, s: _Shape, full: bool) -> tuple[np.ndarray, bool]:
     return coll < 0.5, wc >= nx
 
 
+def _batch_valid(ctx: _Context, occ: np.ndarray, kernels: list[np.ndarray], keys: list, first: bool,
+                 dtype) -> list[np.ndarray]:
+    """'valid' correlations of one occupancy window with several (flipped)
+    kernels: the window is transformed once, kernel transforms come from the
+    LRU cache, each kernel then costs one inverse FFT."""
+    ny, wc = occ.shape
+    kh = max(k.shape[0] for k in kernels)
+    kw = max(k.shape[1] for k in kernels)
+    fshape = (sp_fft.next_fast_len(ny + kh - 1, real=True), sp_fft.next_fast_len(wc + kw - 1, real=True))
+    ctx.check_stop(first)
+    with sp_fft.set_workers(-1):
+        focc = sp_fft.rfft2(occ.astype(dtype), s=fshape)
+    out = []
+    for ker, key in zip(kernels, keys):
+        ctx.check_stop(first)
+        kf = ctx.kernel_fft(key, ker, fshape)
+        with sp_fft.set_workers(-1):
+            conv = sp_fft.irfft2(focc * kf, s=fshape)
+        out.append(conv[ker.shape[0] - 1:ny, ker.shape[1] - 1:wc])
+    return out
+
+
+def _free_maps(grid: _Grid, ctx: _Context, shapes: list[_Shape], first: bool) -> list[tuple[np.ndarray, bool]]:
+    """_free_map for several kernels at once (one shared occupancy FFT).
+    Polls ctx.check_stop() between rotations."""
+    if len(shapes) == 1:
+        ctx.check_stop(first)
+        return [_free_map(grid, shapes[0], full=False)]
+    nx = grid.base.nx
+    kw = max(s.kw for s in shapes)
+    step = max(16, int(round(_WIN_STEP_MM / ctx.r)))
+    wc = min(nx, int(math.ceil((grid.max_col + kw + 2) / step)) * step)
+    dtype = np.float64 if any(s.kernel.dtype == np.float64 for s in shapes) else np.float32
+    colls = _batch_valid(ctx, grid.occ[:, :wc], [s.kernel.astype(dtype, copy=False) for s in shapes],
+                         [("f", s.part_id, s.order, np.dtype(dtype).str) for s in shapes], first, dtype)
+    return [(c < 0.5, wc >= nx) for c in colls]
+
+
+def _pool(a: np.ndarray, f: int, pad_value: bool) -> np.ndarray:
+    """Coarse grid: a coarse cell is True when any of its f x f fine cells is."""
+    ny, nx = a.shape
+    py, px = (-ny) % f, (-nx) % f
+    if py or px:
+        a = np.pad(a, ((0, py), (0, px)), constant_values=pad_value)
+    return a.reshape(a.shape[0] // f, f, a.shape[1] // f, f).any(axis=(1, 3))
+
+
+def _prune_rotations(grid: _Grid, ctx: _Context, shapes: list[_Shape], first: bool) -> list[_Shape]:
+    """With many rotations on a fine grid, rank them on a coarse copy of the grid
+    (about 2 mm cells, conservative: a coarse free cell is free on the fine
+    grid too) and keep the _PRUNE_KEEP best for the fine search. If none fits
+    on the coarse grid (a tight spot), all rotations are searched fine."""
+    f = ctx.pool_f
+    occ_c = _pool(grid.occ, f, True)
+    nxc = occ_c.shape[1]
+    kers, keys = [], []
+    for s in shapes:
+        kc = ctx.coarse_kernel(s)
+        kers.append(kc)
+        keys.append(("c", s.part_id, s.order))
+    kwc = max(k.shape[1] for k in kers)
+    if any(k.shape[0] > occ_c.shape[0] or k.shape[1] > nxc for k in kers):
+        return shapes
+    step = max(16, int(round(_WIN_STEP_MM / (ctx.r * f))))
+    wc = min(nxc, int(math.ceil((int(math.ceil(grid.max_col / f)) + kwc + 2) / step)) * step)
+    colls = _batch_valid(ctx, occ_c[:, :wc], kers, keys, first, np.float32)
+    base, r = grid.base, ctx.r
+    ranked = []
+    for s, c in zip(shapes, colls):
+        cell = _best_cell(c < 0.5)
+        if cell is not None:
+            i, j = cell
+            ranked.append(((base.ox + (f * j + 1) * r + s.w, base.oy + (f * i + 1) * r, s.order), s))
+    if not ranked:
+        return shapes
+    ranked.sort(key=lambda t: t[0])
+    keep = {id(s) for _, s in ranked[:_PRUNE_KEEP]}
+    return [s for s in shapes if id(s) in keep]
+
+
 def _exact_ok(grid: _Grid, ctx: _Context, poly: Polygon) -> bool:
     """Exact shapely check: inside the margin and at least gap from every placed part."""
     if not grid.base.container.covers(poly):
@@ -306,7 +475,7 @@ def _slide(grid: _Grid, ctx: _Context, part: Part, s: _Shape, X: float, Y: float
     span = 2.5 * ctx.r
 
     def ok(x, y):
-        return _exact_ok(grid, ctx, place(part.shape, s.rotation, x - s.bx, y - s.by))
+        return _exact_ok(grid, ctx, place(part.shape, s.rotation, x - s.bx, y - s.by, s.mirror))
 
     for axis in (0, 1, 0):
         lo, hi = 0.0, span
@@ -326,17 +495,19 @@ def _slide(grid: _Grid, ctx: _Context, part: Part, s: _Shape, X: float, Y: float
     return X, Y
 
 
-def _place_one(grid: _Grid, ctx: _Context, pid: str, copy: int) -> bool:
+def _place_one(grid: _Grid, ctx: _Context, pid: str, copy: int, first: bool = True) -> bool:
     part = ctx.parts[pid]
     base = grid.base
     r = ctx.r
     cands = []   # [free map, searched all columns, shape, best cell, crossed-out cells]
-    for s in ctx.shapes(pid):
-        if s.kh > base.ny or s.kw > base.nx or s.ncells > grid.free:
-            continue
-        free, full = _free_map(grid, s, full=False)
+    shapes = [s for s in ctx.shapes(pid) if not (s.kh > base.ny or s.kw > base.nx or s.ncells > grid.free)]
+    if len(shapes) > _PRUNE_KEEP and ctx.pool_f >= 2:
+        shapes = _prune_rotations(grid, ctx, shapes, first)
+    maps = _free_maps(grid, ctx, shapes, first) if shapes else []
+    for s, (free, full) in zip(shapes, maps):
         cell = _best_cell(free)
         if cell is None and not full:
+            ctx.check_stop(first)
             free, full = _free_map(grid, s, full=True)
             cell = _best_cell(free)
         if cell is not None:
@@ -351,11 +522,11 @@ def _place_one(grid: _Grid, ctx: _Context, pid: str, copy: int) -> bool:
         c = min(cands, key=key)
         free, full, s, (i, j), crossed = c
         X, Y = base.ox + (j + 1) * r, base.oy + (i + 1) * r
-        poly = place(part.shape, s.rotation, X - s.bx, Y - s.by)
+        poly = place(part.shape, s.rotation, X - s.bx, Y - s.by, s.mirror)
         if _exact_ok(grid, ctx, poly):
             X2, Y2 = _slide(grid, ctx, part, s, X, Y)
             X2, Y2 = round(X2, 4), round(Y2, 4)
-            poly2 = place(part.shape, s.rotation, X2 - s.bx, Y2 - s.by)
+            poly2 = place(part.shape, s.rotation, X2 - s.bx, Y2 - s.by, s.mirror)
             if _exact_ok(grid, ctx, poly2):
                 X, Y, poly = X2, Y2, poly2
             _commit(grid, ctx, pid, copy, s, X, Y, poly)
@@ -366,6 +537,7 @@ def _place_one(grid: _Grid, ctx: _Context, pid: str, copy: int) -> bool:
         crossed.append((i, j))
         cell = _best_cell(free)
         if cell is None and not full:
+            ctx.check_stop(first)
             free, full = _free_map(grid, s, full=True)
             for ci, cj in crossed:
                 free[ci, cj] = False
@@ -405,43 +577,70 @@ class _Layout:
     grids: list[_Grid]
     unplaced: Counter
     score: tuple = field(default=())
+    complete: bool = True
 
 
-def _run(ctx: _Context, order: list[tuple[str, int]], deadline: float = math.inf) -> _Layout | None:
-    """One attempt for one order. Returns None if `deadline` (perf_counter) passes
-    first; the first attempt is run without a deadline."""
+def _run(ctx: _Context, order: list[tuple[str, int]], first: bool = False,
+         on_step: Callable[[float], None] | None = None) -> _Layout | None:
+    """One attempt for one order. Later attempts (first=False) return None when
+    ctx.deadline passes or should_stop() says yes. The first attempt ignores the
+    deadline; on cancel it returns what it placed so far (complete=False)."""
     remaining = list(order)
     grids: list[_Grid] = []
-    for si, spec in enumerate(ctx.specs):
-        if not remaining:
-            break
-        base = ctx.base(si)
-        if base is None:
-            continue
-        limit = math.inf if spec.qty is None else max(0, int(spec.qty))
-        used = 0
-        while remaining and used < limit:
-            grid = _Grid(base, si)
-            failed: set[str] = set()       # parts that did not fit this sheet copy: their other copies won't either
-            left: list[tuple[str, int]] = []
-            for pid, copy in remaining:
-                if time.perf_counter() > deadline:
-                    return None
-                if pid in failed or (pid, si) in ctx.never_fits:
+    total = max(1, len(order))
+    done = 0
+    try:
+        for si, spec in enumerate(ctx.specs):
+            if not remaining:
+                break
+            base = ctx.base(si)
+            if base is None:
+                continue
+            limit = math.inf if spec.qty is None else max(0, int(spec.qty))
+            used = 0
+            while remaining and used < limit:
+                grid = _Grid(base, si)
+                failed: set[str] = set()       # parts that did not fit this sheet copy: their other copies won't either
+                left: list[tuple[str, int]] = []
+                for n, (pid, copy) in enumerate(remaining):
+                    ctx.check_stop(first)
+                    if pid in failed or (pid, si) in ctx.never_fits:
+                        left.append((pid, copy))
+                        continue
+                    if ctx.separate and grid.color is not None and ctx.color(pid) != grid.color:
+                        left.append((pid, copy))   # another colour: waits for its own sheet
+                        continue
+                    was_empty = grid.empty
+                    try:
+                        ok = _place_one(grid, ctx, pid, copy, first)
+                    except _Stopped:
+                        left.extend(remaining[n:])
+                        remaining = left
+                        if not grid.empty:
+                            grids.append(grid)
+                        raise
+                    if ok:
+                        if grid.color is None:
+                            grid.color = ctx.color(pid)
+                        done += 1
+                        if on_step is not None:
+                            on_step(done / total)
+                        continue
+                    failed.add(pid)
+                    if was_empty and not (ctx.separate and grid.color is not None):
+                        ctx.never_fits.add((pid, si))
                     left.append((pid, copy))
-                    continue
-                was_empty = grid.empty
-                if _place_one(grid, ctx, pid, copy):
-                    continue
-                failed.add(pid)
-                if was_empty:
-                    ctx.never_fits.add((pid, si))
-                left.append((pid, copy))
-            remaining = left
-            if grid.empty:
-                break                       # nothing more fits this kind of sheet
-            grids.append(grid)
-            used += 1
+                remaining = left
+                if grid.empty:
+                    break                       # nothing more fits this kind of sheet
+                grids.append(grid)
+                used += 1
+    except _Stopped:
+        if not first:
+            return None
+        lay = _Layout(grids, Counter(pid for pid, _ in remaining), complete=False)
+        lay.score = _score(ctx, lay)
+        return lay
     lay = _Layout(grids, Counter(pid for pid, _ in remaining))
     lay.score = _score(ctx, lay)
     return lay
@@ -499,47 +698,104 @@ def _perturb(order: list[tuple[str, int]], areas: dict[str, float], rng: random.
 
 # --------------------------------------------------------------------------- public API
 
-def nest(parts: list[Part], sheets: list[SheetSpec], settings: NestSettings) -> NestResult:
-    """Pack all part copies on as few sheets as possible. See module docstring."""
+def nest(parts: list[Part], sheets: list[SheetSpec], settings: NestSettings, *,
+         progress: Callable[[float, dict], None] | None = None,
+         should_stop: Callable[[], bool] | None = None) -> NestResult:
+    """Pack all part copies on as few sheets as possible. See module docstring.
+
+    progress(fraction, best) is called about 4 times a second and once at the
+    end with 1.0; best = {"attempts", "sheets", "unplaced", "utilisation",
+    "elapsed_s"} of the best layout so far (None before the first one is done).
+    should_stop() is polled often; when it returns True the run stops and the
+    best layout so far is returned (meta["stopped"] == "cancel")."""
     t0 = time.perf_counter()
     by_id: dict[str, Part] = {}
     for p in parts:
         by_id.setdefault(p.id, p)
-    ctx = _Context(by_id, list(sheets), settings)
+    ctx = _Context(by_id, list(sheets), settings, should_stop=should_stop)
+    limit = max(0.0, float(settings.time_limit_s or 0.0))
 
     # Step 1 + 7: instances, biggest first (ties: input order, then copy number).
+    # With separate colours, colour groups go one after the other (biggest group first).
     index = {p.id: k for k, p in enumerate(by_id.values())}
     instances = [(p.id, c) for p in by_id.values() if p.qty and p.qty > 0 for c in range(int(p.qty))]
     areas = {pid: by_id[pid].area for pid in by_id}
-    order = sorted(instances, key=lambda t: (-areas[t[0]], index[t[0]], t[1]))
+    group_key: dict[str, float] = {}
+    if ctx.separate:
+        tot: Counter = Counter()
+        for pid, _ in instances:
+            tot[ctx.color(pid)] += areas[pid]
+        rank = {c: k for k, (c, _) in enumerate(sorted(tot.items(), key=lambda kv: (-kv[1], kv[0])))}
+        group_key = {pid: rank[ctx.color(pid)] for pid in by_id if ctx.color(pid) in rank}
+    order = sorted(instances, key=lambda t: (group_key.get(t[0], 0), -areas[t[0]], index[t[0]], t[1]))
 
-    best = _run(ctx, order)
+    state = {"p": 0.0, "last": 0.0, "best": None}
+
+    def summary(lay: _Layout, attempts: int) -> dict:
+        used = sum(ctx.parts[pid].area for g in lay.grids for pid, *_ in g.items)
+        area = sum(g.base.spec.polygon().area for g in lay.grids) or 1.0
+        return dict(attempts=attempts, sheets=len(lay.grids), unplaced=int(sum(lay.unplaced.values())),
+                    utilisation=round(used / area, 4), elapsed_s=round(time.perf_counter() - t0, 2))
+
+    def report(frac: float, force: bool = False) -> None:
+        if progress is None:
+            return
+        now = time.perf_counter()
+        state["p"] = max(state["p"], min(1.0, frac))
+        if force or now - state["last"] >= _PROGRESS_EVERY_S:
+            state["last"] = now
+            try:
+                progress(state["p"], state["best"])
+            except Exception:       # a broken callback must not kill the nest
+                pass
+
+    # the first layout is roughly a fifth of a timed run (all of an untimed one)
+    w_first = 0.2 if limit > 0 else 0.99
+    best = _run(ctx, order, first=True, on_step=lambda f: report(f * w_first))
     attempts = 1
+    stopped = "done" if best.complete else "cancel"
+    state["best"] = summary(best, attempts)
+    report(w_first, force=True)
 
     # Step 8: seeded improvement loop until the time limit.
     rng = random.Random(settings.seed)
     seen = {tuple(pid for pid, _ in order)}
     stale = 0
-    limit = max(0.0, float(settings.time_limit_s or 0.0))
     cur = order
-    while time.perf_counter() - t0 < limit and len(set(p for p, _ in order)) > 1:
+    ctx.deadline = t0 + limit
+    while best.complete and len(set(p for p, _ in order)) > 1:
+        if time.perf_counter() - t0 >= limit:
+            stopped = "time" if limit > 0 else "done"
+            break
+        if should_stop is not None and should_stop():
+            stopped = "cancel"
+            break
         cand = _perturb(cur if rng.random() < 0.7 else order, areas, rng)
         sig = tuple(pid for pid, _ in cand)
         if sig in seen:
             stale += 1
             if stale >= _STALE_ORDERS_STOP:
+                stopped = "exhausted"
                 break
             continue
         stale = 0
         seen.add(sig)
-        lay = _run(ctx, cand, deadline=t0 + limit)
-        if lay is None:            # ran out of time half-way: drop the unfinished attempt
+        lay = _run(ctx, cand)
+        if lay is None:            # ran out of time or cancelled half-way: drop the unfinished attempt
+            stopped = "cancel" if (should_stop is not None and should_stop()) else "time"
             break
         attempts += 1
         if lay.score < best.score:
             best, cur = lay, cand
+            state["best"] = summary(best, attempts)
+        report(w_first + (1 - w_first) * (time.perf_counter() - t0) / limit if limit > 0 else w_first)
 
-    return _build_result(ctx, best, settings, attempts, time.perf_counter() - t0)
+    res = _build_result(ctx, best, settings, attempts, time.perf_counter() - t0)
+    res.meta = dict(resolution_mm=ctx.r, resolution_requested=ctx.r_requested, rotations=list(ctx.rotations),
+                    stopped=stopped, complete=best.complete, separate_colors=ctx.separate)
+    state["best"] = summary(best, attempts)
+    report(1.0, force=True)
+    return res
 
 
 def _build_result(ctx: _Context, lay: _Layout, st: NestSettings, attempts: int, elapsed: float) -> NestResult:
@@ -551,7 +807,7 @@ def _build_result(ctx: _Context, lay: _Layout, st: NestSettings, attempts: int, 
         used = 0.0
         for pid, copy, s, X, Y in g.items:
             pls.append(Placement(part_id=pid, copy=copy, x=round(X - s.bx, 6), y=round(Y - s.by, 6),
-                                 rotation=s.rotation))
+                                 rotation=s.rotation, mirror=s.mirror))
             used += ctx.parts[pid].area
         sheet_area = spec.polygon().area
         out.append(SheetResult(sheet_id=spec.id, index=k, width=spec.width, height=spec.height,

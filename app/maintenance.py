@@ -44,11 +44,16 @@ def clean_old_files(db: Database, days: int = FILE_DAYS, now: float | None = Non
             if not os.path.isdir(folder):
                 continue
             gone = set()
-            for name in os.listdir(folder):
-                path = os.path.join(folder, name)
+            for rec in sv.exports_of(job):
+                name = rec.get("name", "")
+                sub = rec.get("dir") or ""
+                path = os.path.join(folder, sub, name)
                 if os.path.isfile(path) and _old(path, cutoff):
                     os.remove(path)
                     gone.add(name)
+                    d = os.path.dirname(path)
+                    if sub and os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
             if gone:
                 removed_exports += len(gone)
                 recs = [r for r in sv.exports_of(job) if r.get("name") not in gone]
