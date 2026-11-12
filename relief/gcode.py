@@ -51,7 +51,7 @@ def write_gcode(path: str, polylines: list[np.ndarray], tool: Tool, *, title: st
         f"M03 S{tool.rpm}",
         "G4 P3",                       # let the spindle reach speed
     ]
-    cut = rapid = 0.0
+    cut = rapid = plunge = 0.0   # plunge = length moved at the plunge feed (time estimate)
     pos = np.array([0.0, 0.0, safe_z])
     z_min = 0.0
     feed_now = None
@@ -69,6 +69,7 @@ def write_gcode(path: str, polylines: list[np.ndarray], tool: Tool, *, title: st
             if z0 < zl:
                 out.append(f"G1 Z{_f(z0)} F{_f(tool.plunge_mm_min)}")
             cut += hop + abs(zl - pos[2]) + abs(zl - z0)
+            plunge += abs(zl - pos[2]) + abs(zl - z0)
             feed_now = tool.plunge_mm_min if z0 < zl else tool.feed_mm_min
         else:
             # lift, travel, plunge
@@ -79,6 +80,7 @@ def write_gcode(path: str, polylines: list[np.ndarray], tool: Tool, *, title: st
             rapid += hop
             out.append(f"G1 Z{_f(z0)} F{_f(tool.plunge_mm_min)}")
             cut += safe_z - z0
+            plunge += safe_z - z0
             feed_now = tool.plunge_mm_min
         prev = np.array([x0, y0, z0])
         for x, y, z in ln[1:]:
@@ -94,5 +96,6 @@ def write_gcode(path: str, polylines: list[np.ndarray], tool: Tool, *, title: st
     out += [f"G0 Z{_f(safe_z)}", "M05", "G0 X0 Y0", "M30", ""]
     with open(path, "w", newline="\r\n") as fh:   # NC Studio runs on Windows
         fh.write("\n".join(out))
-    minutes = cut / tool.feed_mm_min + rapid / RAPID_MM_MIN
+    minutes = ((cut - plunge) / tool.feed_mm_min + plunge / tool.plunge_mm_min
+               + rapid / RAPID_MM_MIN + 3 / 60)   # + G4 P3 spindle wait
     return JobInfo(path, tool, len(out), cut, rapid, minutes, z_min)
