@@ -37,11 +37,17 @@ def _comment(text: str) -> str:
 
 
 def write_ncstudio(path: str, paths: list[ToolPath], tool: CamTool, *, title: str,
-                   sheet_w: float, sheet_h: float, safe_z: float) -> GcodeInfo:
+                   sheet_w: float, sheet_h: float, safe_z: float,
+                   info: list[str] | None = None) -> GcodeInfo:
     """Write the paths that belong to `tool` (tool_id == tool.id) in the given
     order. Between consecutive paths that start where the last one ended (the
     next depth level of the same ring) the bit goes straight down without
-    lifting; everything else lifts to safe_z, travels, and plunges."""
+    lifting; everything else lifts to safe_z, travels, and plunges.
+
+    `info` lines (job, sheet n/total, revision, material...) go in as extra
+    comment lines right after the SHEET line, so the operator can prove which
+    file was cut. Ramp and helix entry moves are ordinary G1 X Y Z moves at the
+    cutting feed and count in cut_mm and the time estimate."""
     if safe_z <= 0:
         raise ValueError("safe_z must be above the material top (Z0)")
     kind = {"vbit": "VBIT", "ball": "BALL"}.get(tool.kind, "FLAT")
@@ -51,6 +57,7 @@ def write_ncstudio(path: str, paths: list[ToolPath], tool: CamTool, *, title: st
         f"(TOOL {_comment(tool.name)} D{_f(tool.diameter_mm)} {kind}{angle}"
         f" - load this bit, then set Z0 on top of material)",
         f"(SHEET {_f(sheet_w)} x {_f(sheet_h)} mm, origin bottom-left, Z0 = material top)",
+        *[f"({_comment(x)})" for x in (info or [])],
         "G21 G90 G17",
         f"G0 Z{_f(safe_z)}",
         f"M03 S{int(tool.rpm)}",

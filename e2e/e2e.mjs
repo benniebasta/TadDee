@@ -146,6 +146,11 @@ await step('sheet preview zooms', async () => {
 }, page);
 
 await step('export NC Studio G-code', async () => {
+  // the letters have inside corners tighter than the 6 mm bit: the checks list them
+  await tid(page, 'export-check').click();
+  await tid(page, 'export-issue').first().waitFor({ timeout: 60000 });
+  // ...and the export needs them accepted
+  await tid(page, 'export-accept-warnings').check();
   await tid(page, 'export-ncstudio').click();
   await tid(page, 'export-file').first().waitFor({ timeout: 60000 });
   const links = await tid(page, 'export-file').evaluateAll((as) => as.map((a) => a.getAttribute('href')));
@@ -168,7 +173,11 @@ await step('switch job to laser and export Ruida DXF', async () => {
   if (await sel.count()) await sel.selectOption(String(laser.id));
   else await page.request.patch(`${BASE}/api/jobs/${id}`, { data: { machine_id: laser.id } });
   await page.reload();
+  // wait for the re-nest itself: the old preview is still on screen, and the old
+  // layout (bigger than the laser bed) is refused by the export checks
+  const nested = page.waitForResponse((r) => r.url().endsWith('/nest') && r.request().method() === 'POST', { timeout: 60000 });
   await tid(page, 'nest-run').click();
+  await nested;
   await tid(page, 'sheet-preview').first().waitFor({ timeout: 60000 });
   await tid(page, 'export-ruida').click();
   await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="export-file"]')].some((a) => /\.dxf$/i.test(a.getAttribute('href'))), null, { timeout: 60000 });

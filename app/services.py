@@ -17,6 +17,7 @@ import time
 import uuid
 import zipfile
 from dataclasses import asdict, fields
+from datetime import datetime
 
 from shapely import wkt as shapely_wkt
 from shapely.affinity import translate
@@ -25,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from core.models import NestResult, NestSettings, Part, Placement, SheetResult, SheetSpec
 
-from .models import Job, JobPart, Machine, Material, NestRun, Offcut, ReliefRun, Tool
+from .models import FeedOverride, Job, JobPart, Machine, Material, NestRun, Offcut, ReliefRun, Tool
 
 VERSION = "0.1.0"
 MAX_UPLOAD = 20 * 1024 * 1024          # 20 MB per file
@@ -37,10 +38,11 @@ DEFAULT_CUT_THROUGH = 0.3
 class UserError(Exception):
     """Something the user can fix. Becomes an HTTP error with this sentence."""
 
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, extra: dict | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.extra = extra or {}     # more keys for the JSON body (e.g. "issues")
 
 
 def not_found(what: str) -> UserError:
@@ -106,7 +108,24 @@ def machine_out(m: Machine | None) -> dict | None:
 def tool_out(t: Tool) -> dict:
     return dict(id=t.id, name=t.name, diameter_mm=t.diameter_mm, kind=t.kind, angle_deg=t.angle_deg,
                 feed_mm_min=t.feed_mm_min, plunge_mm_min=t.plunge_mm_min, rpm=t.rpm,
-                pass_depth_mm=t.pass_depth_mm)
+                pass_depth_mm=t.pass_depth_mm, ramp_mm=_ramp(t))
+
+
+def _ramp(t: Tool) -> float:
+    return 12.0 if t.ramp_mm is None else float(t.ramp_mm)
+
+
+def feed_out(f: FeedOverride) -> dict:
+    return dict(id=f.id, material_id=f.material_id, tool_id=f.tool_id, feed_mm_min=f.feed_mm_min,
+                plunge_mm_min=f.plunge_mm_min, rpm=f.rpm, pass_depth_mm=f.pass_depth_mm, notes=f.notes or "")
+
+
+def feed_for(s: Session, material_id: int | None, tool_id: int | None) -> FeedOverride | None:
+    """The feeds-and-speeds row for this material and bit, if the shop made one."""
+    if material_id is None or tool_id is None:
+        return None
+    return s.scalars(select(FeedOverride).where(FeedOverride.material_id == material_id,
+                                                FeedOverride.tool_id == tool_id)).first()
 
 
 def material_out(m: Material | None) -> dict | None:
@@ -122,11 +141,17 @@ def offcut_out(o: Offcut) -> dict:
                 used=bool(o.used))
 
 
-def cam_tool(t: Tool):
+def cam_tool(t: Tool, override: FeedOverride | None = None):
+    """CamTool from the bit row; values in the material's feeds-and-speeds
+    row (when there is one) win over the bit defaults, field by field."""
     from cam.toolpaths import CamTool
+
+    def pick(name):
+        v = getattr(override, name, None) if override is not None else None
+        return getattr(t, name) if v is None else v
     return CamTool(id=str(t.id), name=t.name, diameter_mm=t.diameter_mm, kind=t.kind, angle_deg=t.angle_deg,
-                   feed_mm_min=t.feed_mm_min, plunge_mm_min=t.plunge_mm_min, rpm=t.rpm,
-                   pass_depth_mm=t.pass_depth_mm)
+                   feed_mm_min=pick("feed_mm_min"), plunge_mm_min=pick("plunge_mm_min"), rpm=int(pick("rpm")),
+                   pass_depth_mm=max(0.1, float(pick("pass_depth_mm"))), ramp_mm=_ramp(t))
 
 
 # ---------- parts ----------
@@ -285,7 +310,10 @@ def build_nest_out(s: Session, job: Job, parts: list[Part], result: NestResult) 
                            parts_count=len(sh.placements), svg=sheet_svg(sh, pmap), offcut=oc))
     full_sheets = sum(1 for sh in result.sheets if not sh.is_offcut)
     price = mat.price_per_sheet if mat else 0.0
-    minutes = _cut_estimate(pmap, result, default_cut_tool(s), mat.thickness_mm if mat else None,
+    cut = default_cut_tool(s)
+    if cut is not None and mat is not None:
+        cut = cam_tool(cut, feed_for(s, mat.id, cut.id))      # same fields as a Tool row
+    minutes = _cut_estimate(pmap, result, cut, mat.thickness_mm if mat else None,
                             laser=bool(mach and mach.kind == "laser"))
     rate = mach.rate_per_hour if mach else 0.0
     sheets_thb = round(full_sheets * price, 2)
@@ -371,133 +399,265 @@ def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
 
 
 # ---------- exports ----------
+#
+# Every successful export is a new revision of the job (1, 2, 3...). Its files
+# go in <job folder>/rev<NNN>/ and carry the revision in their name, so nothing
+# is ever overwritten: the operator can always prove which file was cut. The
+# job lists every file; `current` marks the latest revision of each target
+# made since the latest nest (a re-nest keeps the old files, as not current).
 
 def exports_of(job: Job) -> list[dict]:
     return json.loads(job.exports_json or "[]")
 
 
-def file_out(job_id: int, rec: dict) -> dict:
+def _current_names(recs: list[dict]) -> set[str]:
+    latest: dict[str, int] = {}
+    for r in recs:
+        if not r.get("stale"):
+            t = r.get("target") or ""
+            latest[t] = max(latest.get(t, 0), int(r.get("revision") or 0))
+    return {r["name"] for r in recs
+            if not r.get("stale") and int(r.get("revision") or 0) == latest.get(r.get("target") or "", -1)}
+
+
+def file_out(job_id: int, rec: dict, current: bool = True) -> dict:
     return dict(name=rec["name"], url=f"/api/jobs/{job_id}/files/{rec['name']}", size=rec.get("size", 0),
                 minutes=rec.get("minutes"), tool=rec.get("tool"), target=rec.get("target"),
-                sheet=rec.get("sheet"))
+                sheet=rec.get("sheet"), revision=rec.get("revision"), current=current,
+                created_at=rec.get("created_at"))
+
+
+def files_out(job: Job) -> list[dict]:
+    """All export files of the job, newest revision first."""
+    recs = exports_of(job)
+    cur = _current_names(recs)
+    order = sorted(range(len(recs)), key=lambda i: (-int(recs[i].get("revision") or 0), i))
+    return [file_out(job.id, recs[i], recs[i]["name"] in cur) for i in order]
 
 
 def clear_exports(data_dir: str, job: Job, target: str | None = None) -> None:
-    keep = []
+    """After a re-nest the files no longer match the layout: keep them (proof of
+    what was cut), but mark them as not current."""
+    recs = exports_of(job)
+    for rec in recs:
+        if target is None or rec.get("target") == target:
+            rec["stale"] = True
+    job.exports_json = json.dumps(recs)
+
+
+def rev_dirname(rev: int) -> str:
+    return f"rev{rev:03d}"
+
+
+def next_revision(data_dir: str, job: Job) -> int:
+    """One more than every revision the job has listed or left on disk."""
+    top = max([int(r.get("revision") or 0) for r in exports_of(job)] + [0])
+    folder = job_dir(data_dir, job.id)
+    if os.path.isdir(folder):
+        for n in os.listdir(folder):
+            m = re.fullmatch(r"rev(\d+)", n)
+            if m:
+                top = max(top, int(m.group(1)))
+    return top + 1
+
+
+def job_file_path(data_dir: str, job: Job, name: str) -> str:
+    """Path of one listed export file (in its revision folder); older files
+    that sit directly in the job folder still work."""
+    if not is_safe_name(name):
+        raise UserError("Bad file name", 400)
     folder = job_dir(data_dir, job.id)
     for rec in exports_of(job):
-        if target is None or rec.get("target") == target:
-            path = os.path.join(folder, rec["name"])
-            if is_safe_name(rec["name"]) and os.path.isfile(path):
-                os.remove(path)
-        else:
-            keep.append(rec)
-    job.exports_json = json.dumps(keep)
+        if rec["name"] == name and rec.get("dir"):
+            d = rec["dir"]
+            if not is_safe_name(d):
+                raise not_found("File")
+            return safe_file(os.path.join(folder, d), name)
+    return safe_file(folder, name)
 
 
-def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
+class _Ctx:
+    """Everything an export or a check needs, resolved once."""
+    result: NestResult
+    parts: dict
+    gap: float
+    target: str
+    mat: Material | None = None
+    mach: Machine | None = None
+    cut_row: Tool | None = None
+    cut_tool = None
+    mark_tool = None
+    cam = None
+    kerf: float = 0.0
+    warnings: list
+
+
+def _context(s: Session, job: Job, target: str, *, cut_tool_id=None, mark_tool_id=None,
+             cam_opts: dict | None = None, kerf_mm: float | None = None) -> _Ctx:
     run = latest_nest(s, job.id)
     if run is None:
         raise UserError("Nest the job before making files", 409)
-    result = result_from_json(json.loads(run.result_json)["result"])
-    parts = {p.id: p for p in job_parts(s, job.id)}
-    warnings: list[str] = []
-    missing = {pl.part_id for sh in result.sheets for pl in sh.placements if pl.part_id not in parts}
+    c = _Ctx()
+    c.target = target
+    c.result = result_from_json(json.loads(run.result_json)["result"])
+    c.parts = {p.id: p for p in job_parts(s, job.id)}
+    c.warnings = []
+    c.mat = s.get(Material, job.material_id) if job.material_id else None
+    c.mach = s.get(Machine, job.machine_id) if job.machine_id else None
+    c.kerf = float(kerf_mm or 0.0)
+    missing = {pl.part_id for sh in c.result.sheets for pl in sh.placements if pl.part_id not in c.parts}
     if missing:
-        warnings.append(f"{len(missing)} part(s) were deleted after nesting and are left out: nest again")
-        for sh in result.sheets:
-            sh.placements = [pl for pl in sh.placements if pl.part_id in parts]
+        c.warnings.append(f"{len(missing)} part(s) were deleted after nesting and are left out: nest again")
+        for sh in c.result.sheets:
+            sh.placements = [pl for pl in sh.placements if pl.part_id in c.parts]
     # parts added or quantities changed after nesting are not in these files
     nested: dict[str, int] = {}
-    for sh in result.sheets:
+    for sh in c.result.sheets:
         for pl in sh.placements:
             nested[pl.part_id] = nested.get(pl.part_id, 0) + 1
-    changed = [p.name for p in parts.values()
-               if nested.get(p.id, 0) + int(result.unplaced.get(p.id, 0)) != p.qty]
+    changed = [p.name for p in c.parts.values()
+               if nested.get(p.id, 0) + int(c.result.unplaced.get(p.id, 0)) != p.qty]
     if changed:
-        warnings.append(f"Parts or quantities changed after nesting ({', '.join(changed[:5])}"
-                        f"{', ...' if len(changed) > 5 else ''}): these files use the old layout, nest again")
+        c.warnings.append(f"Parts or quantities changed after nesting ({', '.join(changed[:5])}"
+                          f"{', ...' if len(changed) > 5 else ''}): these files use the old layout, nest again")
+    c.gap = float(json.loads(run.settings_json).get("gap_mm", 0) or 0)
+    if target != "ncstudio":
+        return c
 
-    folder = job_dir(data_dir, job.id)
+    from cam.toolpaths import CamSettings
+
+    if c.mat is None:
+        raise UserError("Choose a material first: the G-code needs its thickness")
+    if cut_tool_id is not None:
+        c.cut_row = s.get(Tool, cut_tool_id)
+        if c.cut_row is None:
+            raise UserError("Cut tool not found")
+    else:
+        c.cut_row = default_cut_tool(s)
+        if c.cut_row is None:
+            raise UserError("Add a tool in Settings first")
+    mark_row = None
+    if mark_tool_id is not None:
+        mark_row = s.get(Tool, mark_tool_id)
+        if mark_row is None:
+            raise UserError("Mark tool not found")
+    try:
+        c.cam = CamSettings(thickness_mm=c.mat.thickness_mm, **(cam_opts or {}))
+    except TypeError as e:
+        raise UserError(f"Unknown CAM setting: {e}") from e
+    c.cut_tool = cam_tool(c.cut_row, feed_for(s, c.mat.id, c.cut_row.id))
+    c.mark_tool = cam_tool(mark_row, feed_for(s, c.mat.id, mark_row.id)) if mark_row is not None else None
+    return c
+
+
+def _issues(c: _Ctx) -> list[dict]:
+    from cam.checks import pre_export_checks
+
+    bed_w = c.mach.bed_w if c.mach else 0.0
+    bed_h = c.mach.bed_h if c.mach else 0.0
+    try:
+        return pre_export_checks(c.result.sheets, c.parts, target=c.target, cut_tool=c.cut_tool,
+                                 mark_tool=c.mark_tool, cam=c.cam, gap_mm=c.gap, bed_w=bed_w or 0.0,
+                                 bed_h=bed_h or 0.0, kerf_mm=c.kerf)
+    except ValueError as e:
+        raise UserError(str(e)) from e
+
+
+def run_checks(s: Session, job: Job, q) -> dict:
+    """GET /jobs/{id}/checks: the issues an export with these choices would meet."""
+    target = q.target or ("ruida" if job.machine_id and (m := s.get(Machine, job.machine_id))
+                          and m.kind == "laser" else "ncstudio")
+    cam_keys = ("cut_through_mm", "safe_z", "climb", "tabs", "tab_width_mm", "tab_height_mm",
+                "tab_min_part_mm", "engrave_depth_mm", "holes_first", "lead_in", "ramp_max_angle_deg")
+    given = q.model_dump(exclude_none=True)
+    c = _context(s, job, target, cut_tool_id=q.cut_tool_id, mark_tool_id=q.mark_tool_id,
+                 cam_opts={k: v for k, v in given.items() if k in cam_keys}, kerf_mm=q.kerf_mm)
+    issues = _issues(c)
+    return dict(target=target, issues=issues, blocks=sum(1 for i in issues if i["severity"] == "block"),
+                warns=sum(1 for i in issues if i["severity"] == "warn"))
+
+
+def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
+    from cam.checks import summary
+
+    cam_opts = body.cam.model_dump(exclude_none=True) if body.cam else {}
+    c = _context(s, job, body.target, cut_tool_id=body.cut_tool_id, mark_tool_id=body.mark_tool_id,
+                 cam_opts=cam_opts, kerf_mm=body.kerf_mm)
+    if body.target == "ncstudio":
+        # Profiles cut right through the sheet; a V-bit only cuts with its short cone and
+        # its offset (diameter / 2) is wrong at every depth but one.
+        if c.cut_row.kind == "vbit":
+            raise UserError(f"The {c.cut_row.name} cannot cut parts out: pick a flat bit as the cut tool "
+                            f"(a V-bit can be the mark tool)")
+        # Parts closer together than the bit is wide would be cut into by the
+        # neighbour's outside path, so refuse instead of writing unsafe G-code.
+        if c.gap + 1e-6 < c.cut_row.diameter_mm + 0.5:
+            raise UserError(f"The parts were nested {c.gap:g} mm apart but the {c.cut_row.name} is "
+                            f"{c.cut_row.diameter_mm:g} mm wide: nest again with a gap of at least "
+                            f"{c.cut_row.diameter_mm + 1:g} mm, or pick a thinner bit")
+    elif c.kerf > c.gap + 1e-6:
+        # the beam runs kerf/2 outside each part and burns kerf/2 either side of that line
+        raise UserError(f"The parts were nested {c.gap:g} mm apart, less than the {c.kerf:g} mm kerf: "
+                        f"nest again with a gap of at least {c.kerf:g} mm, or lower the kerf")
+
+    # Checks: a block always stops; warnings stop unless the request accepts them.
+    issues = _issues(c)
+    blocks = [i for i in issues if i["severity"] == "block"]
+    if blocks or (issues and not body.accept_warnings):
+        raise UserError(summary(issues), 422, {"issues": issues})
+
+    rev = next_revision(data_dir, job)
+    sub = rev_dirname(rev)
+    folder = os.path.join(job_dir(data_dir, job.id), sub)
     os.makedirs(folder, exist_ok=True)
     base = slug(job.name, f"job{job.id}")
-    records: list[dict] = []
-
-    gap = float(json.loads(run.settings_json).get("gap_mm", 0) or 0)
-    if body.target == "ncstudio":
-        records, w = _export_ncstudio(s, job, result, parts, body, folder, base, gap)
-    else:
-        # the beam runs kerf/2 outside each part and burns kerf/2 either side of that line
-        if (body.kerf_mm or 0.0) > gap + 1e-6:
-            raise UserError(f"The parts were nested {gap:g} mm apart, less than the {body.kerf_mm:g} mm kerf: "
-                            f"nest again with a gap of at least {body.kerf_mm:g} mm, or lower the kerf")
-        records, w = _export_ruida(result, parts, body, folder, base)
-    warnings += w
-
-    # Only now drop the earlier files of this target: a refused export (bad gap, no
-    # material...) must not delete files the job still lists. Same names were overwritten.
-    new_names = {r["name"] for r in records}
-    for rec in exports_of(job):
-        if rec.get("target") == body.target and rec["name"] not in new_names and is_safe_name(rec["name"]):
-            old = os.path.join(folder, rec["name"])
-            if os.path.isfile(old):
-                os.remove(old)
-    job.exports_json = json.dumps([r for r in exports_of(job) if r.get("target") != body.target] + records)
+    stamp = datetime.now()
+    meta = dict(job=job.name, job_id=job.id, revision=rev, total=len(c.result.sheets),
+                material=c.mat.name if c.mat else "", thickness=c.mat.thickness_mm if c.mat else None,
+                date=stamp.strftime("%Y-%m-%d %H:%M"), version=VERSION)
+    try:
+        if body.target == "ncstudio":
+            records, w = _export_ncstudio(c, folder, base, meta)
+        else:
+            records, w = _export_ruida(c, body, folder, base, meta)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)    # a failed export leaves no half revision
+        raise
+    created = iso(stamp)
+    for r in records:
+        r.update(revision=rev, dir=sub, created_at=created)
+    job.exports_json = json.dumps(exports_of(job) + records)
     if job.status in ("draft", "nested", "exported"):
         job.status = "exported"
     s.commit()
-    return {"files": [file_out(job.id, r) for r in records], "warnings": warnings}
+    return {"files": [file_out(job.id, r) for r in records], "warnings": c.warnings + w,
+            "revision": rev, "issues": issues}
 
 
-def _export_ncstudio(s: Session, job: Job, result: NestResult, parts: dict[str, Part], body,
-                     folder: str, base: str, gap_mm: float | None = None) -> tuple[list[dict], list[str]]:
+def _gcode_info(meta: dict, n: int, tool, c: _Ctx) -> list[str]:
+    return [
+        f"JOB {meta['job']} - ID {meta['job_id']}",
+        f"SHEET {n} OF {meta['total']} - REVISION {meta['revision']}",
+        f"MATERIAL {meta['material']} - THICKNESS {meta['thickness']:g} mm",
+        f"BIT {tool.name} - FEED {tool.feed_mm_min:g} - PLUNGE {tool.plunge_mm_min:g} - RPM {tool.rpm}"
+        f" - PASS {tool.pass_depth_mm:g} - RAMP {tool.ramp_mm:g} mm",
+        f"DATE {meta['date']} - Nest {meta['version']}",
+    ]
+
+
+def _export_ncstudio(c: _Ctx, folder: str, base: str, meta: dict) -> tuple[list[dict], list[str]]:
     from cam.ncstudio import write_ncstudio
-    from cam.toolpaths import CamSettings, sheet_toolpaths
+    from cam.toolpaths import sheet_toolpaths
 
-    mat = s.get(Material, job.material_id) if job.material_id else None
-    if mat is None:
-        raise UserError("Choose a material first: the G-code needs its thickness")
-    if body.cut_tool_id is not None:
-        cut_row = s.get(Tool, body.cut_tool_id)
-        if cut_row is None:
-            raise UserError("Cut tool not found")
-    else:
-        cut_row = default_cut_tool(s)
-        if cut_row is None:
-            raise UserError("Add a tool in Settings first")
-    # Profiles cut right through the sheet; a V-bit only cuts with its short cone and
-    # its offset (diameter / 2) is wrong at every depth but one.
-    if cut_row.kind == "vbit":
-        raise UserError(f"The {cut_row.name} cannot cut parts out: pick a flat bit as the cut tool "
-                        f"(a V-bit can be the mark tool)")
-    # Parts closer together than the bit is wide would be cut into by the
-    # neighbour's outside path, so refuse instead of writing unsafe G-code.
-    if gap_mm is not None and gap_mm + 1e-6 < cut_row.diameter_mm + 0.5:
-        raise UserError(f"The parts were nested {gap_mm:g} mm apart but the {cut_row.name} is "
-                        f"{cut_row.diameter_mm:g} mm wide: nest again with a gap of at least "
-                        f"{cut_row.diameter_mm + 1:g} mm, or pick a thinner bit")
-    mark_row = None
-    if body.mark_tool_id is not None:
-        mark_row = s.get(Tool, body.mark_tool_id)
-        if mark_row is None:
-            raise UserError("Mark tool not found")
-
-    cam_opts = body.cam.model_dump(exclude_none=True) if body.cam else {}
-    try:
-        cs = CamSettings(thickness_mm=mat.thickness_mm, **cam_opts)
-    except TypeError as e:
-        raise UserError(f"Unknown CAM setting: {e}") from e
-    cut_tool = cam_tool(cut_row)
-    mark_tool = cam_tool(mark_row) if mark_row is not None else None
-    tools = {cut_tool.id: cut_tool}
-    if mark_tool is not None:
-        tools[mark_tool.id] = mark_tool
-
+    tools = {c.cut_tool.id: c.cut_tool}
+    if c.mark_tool is not None:
+        tools[c.mark_tool.id] = c.mark_tool
+    rev = meta["revision"]
     records, warnings = [], []
-    for sh in result.sheets:
+    for sh in c.result.sheets:
         n = sh.index + 1
         try:
-            paths, w = sheet_toolpaths(sh, parts, cut_tool, mark_tool, cs)
+            paths, w = sheet_toolpaths(sh, c.parts, c.cut_tool, c.mark_tool, c.cam)
         except ValueError as e:
             raise UserError(str(e)) from e
         warnings += [f"Sheet {n}: {x}" for x in w]
@@ -507,12 +667,12 @@ def _export_ncstudio(s: Session, job: Job, result: NestResult, parts: dict[str, 
             if p.tool_id not in order:
                 order.append(p.tool_id)
         for tid in order:
-            tool = tools.get(tid, cut_tool)
-            name = f"{base}_sheet{n:02d}_{slug(tool.name, 'tool' + tid)}.nc"
+            tool = tools.get(tid, c.cut_tool)
+            name = f"{base}_sheet{n:02d}_{slug(tool.name, 'tool' + tid)}_r{rev}.nc"
             path = os.path.join(folder, name)
             info = write_ncstudio(path, [p for p in paths if p.tool_id == tid], tool,
-                                  title=f"{job.name} sheet {n}", sheet_w=sh.width, sheet_h=sh.height,
-                                  safe_z=cs.safe_z)
+                                  title=f"{meta['job']} sheet {n}", sheet_w=sh.width, sheet_h=sh.height,
+                                  safe_z=c.cam.safe_z, info=_gcode_info(meta, n, tool, c))
             records.append(dict(name=name, size=os.path.getsize(path), minutes=round(info.minutes, 1),
                                 tool=tool.name, target="ncstudio", sheet=n))
         if not paths:
@@ -520,18 +680,23 @@ def _export_ncstudio(s: Session, job: Job, result: NestResult, parts: dict[str, 
     return records, warnings
 
 
-def _export_ruida(result: NestResult, parts: dict[str, Part], body, folder: str,
-                  base: str) -> tuple[list[dict], list[str]]:
+def _export_ruida(c: _Ctx, body, folder: str, base: str, meta: dict) -> tuple[list[dict], list[str]]:
     from cam.ruida import write_ruida_dxf
 
+    rev = meta["revision"]
     records, warnings = [], []
-    for sh in result.sheets:
+    for sh in c.result.sheets:
         n = sh.index + 1
-        name = f"{base}_sheet{n:02d}.dxf"
+        name = f"{base}_sheet{n:02d}_r{rev}.dxf"
         path = os.path.join(folder, name)
+        info = {"NEST_JOB": meta["job"], "NEST_JOB_ID": str(meta["job_id"]),
+                "NEST_SHEET": f"{n} of {meta['total']}", "NEST_REVISION": str(rev),
+                "NEST_MATERIAL": meta["material"],
+                "NEST_THICKNESS_MM": "" if meta["thickness"] is None else f"{meta['thickness']:g}",
+                "NEST_KERF_MM": f"{c.kerf:g}", "NEST_DATE": meta["date"], "NEST_VERSION": meta["version"]}
         try:
-            count = write_ruida_dxf(path, sh, parts, kerf_mm=body.kerf_mm or 0.0,
-                                    include_sheet_outline=bool(body.include_sheet_outline))
+            count = write_ruida_dxf(path, sh, c.parts, kerf_mm=c.kerf,
+                                    include_sheet_outline=bool(body.include_sheet_outline), info=info)
         except ValueError as e:
             raise UserError(str(e)) from e
         if not count:
@@ -541,16 +706,24 @@ def _export_ruida(result: NestResult, parts: dict[str, Part], body, folder: str,
     return records, warnings
 
 
-def export_zip(data_dir: str, job: Job) -> bytes:
+def export_zip(data_dir: str, job: Job, all_revisions: bool = False) -> bytes:
+    """Zip of the current files (latest revision per target), or of every revision."""
     recs = exports_of(job)
-    folder = job_dir(data_dir, job.id)
-    names = [r["name"] for r in recs if is_safe_name(r["name"]) and os.path.isfile(os.path.join(folder, r["name"]))]
-    if not names:
+    cur = _current_names(recs)
+    picked = []
+    for r in recs:
+        if not all_revisions and r["name"] not in cur:
+            continue
+        try:
+            picked.append((job_file_path(data_dir, job, r["name"]), r))
+        except UserError:
+            continue
+    if not picked:
         raise not_found("Exported files")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for n in names:
-            z.write(os.path.join(folder, n), n)
+        for path, r in picked:
+            z.write(path, f"{r['dir']}/{r['name']}" if all_revisions and r.get("dir") else r["name"])
     return buf.getvalue()
 
 
@@ -617,7 +790,7 @@ def job_detail(s: Session, job: Job) -> dict:
                 settings={k: settings[k] for k in ("gap_mm", "rotations", "allow_in_holes", "resolution_mm",
                                                     "time_limit_s", "seed", "use_offcuts", "margin_mm",
                                                     "sheet_w", "sheet_h")},
-                nest=nest, exports=[file_out(job.id, r) for r in exports_of(job)])
+                nest=nest, exports=files_out(job))
 
 
 def delete_job(s: Session, data_dir: str, job: Job) -> None:

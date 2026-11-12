@@ -315,6 +315,34 @@ export async function render(root, { id }, isCurrent) {
   let toolSel = null;
   const exportBody = h('div');
   const filesBox = h('div', { class: 'files', testid: 'export-files' });
+  // pre-export checks: list of issues (codes translated), accept-warnings tick
+  const checksBox = h('div', { class: 'files', testid: 'export-checks' });
+  const acceptChk = h('input', { type: 'checkbox', testid: 'export-accept-warnings' });
+  let lastBody = null;
+  function checksQuery(body) {
+    const q = new URLSearchParams({ target: body.target });
+    for (const [k, v] of Object.entries({ ...body, ...(body.cam || {}) })) {
+      if (k === 'cam' || k === 'target' || k === 'accept_warnings' || v == null || typeof v === 'object') continue;
+      q.set(k, String(v));
+    }
+    return q.toString();
+  }
+  function renderIssues(issues) {
+    const names = Object.fromEntries((S.job.parts || []).map((p) => [p.id, p.name]));
+    checksBox.replaceChildren(...(issues.length ? issues.map((i) => h('div', { class: 'file', testid: 'export-issue' },
+      h('span', { class: `badge ${i.severity === 'block' ? 'warn' : ''}` }, t(i.severity === 'block' ? 'check_block' : 'check_warn')),
+      h('span', {}, t(`check_${i.code}`, {}, i.message)),
+      h('span', { class: 'muted small' }, [i.part_id ? names[i.part_id] ?? i.part_id : null,
+        i.sheet ? `${t('sheet')} ${i.sheet}` : null].filter(Boolean).join(' · '))))
+      : [h('p', { class: 'muted' }, t('checks_ok'))]));
+  }
+  async function runChecks(body) {
+    if (!body) return;
+    try {
+      const res = await api.get(`/jobs/${jid}/checks?${checksQuery(body)}`);
+      renderIssues(res.issues || []);
+    } catch (e) { toastError(e); }
+  }
   const zipLink = h('a', { class: 'btn', testid: 'export-zip', href: url(`/jobs/${jid}/export.zip`), download: '' }, t('download_zip'));
   const commitBtn = h('button', { class: 'btn primary', testid: 'job-commit' }, t('mark_cut'));
   commitBtn.addEventListener('click', async () => {
@@ -332,8 +360,9 @@ export async function render(root, { id }, isCurrent) {
   function renderFiles() {
     const files = S.job.exports || [];
     filesBox.replaceChildren(...(files.length ? files.map((f) => h('div', { class: 'file' },
-      h('a', { href: f.url || url(`/jobs/${jid}/files/${encodeURIComponent(f.name)}`), download: f.name, testid: 'export-file' }, f.name),
-      h('span', { class: 'muted small' }, [f.tool ? f.tool : null, f.minutes != null ? t('minutes_n', { n: num(f.minutes, 1) }) : null,
+      h('a', { href: f.url || url(`/jobs/${jid}/files/${encodeURIComponent(f.name)}`), download: f.name, testid: 'export-file', class: f.current === false ? 'muted' : null }, f.name),
+      h('span', { class: 'muted small' }, [f.revision != null ? t('rev_n', { n: f.revision }) : null,
+        f.current === false ? t('old_rev') : null, f.tool ? f.tool : null, f.minutes != null ? t('minutes_n', { n: num(f.minutes, 1) }) : null,
         f.size != null ? `${num(f.size / 1024, 1)} KB` : null].filter(Boolean).join(' · '))))
       : [h('p', { class: 'muted' }, t('no_files'))]));
     zipLink.classList.toggle('hidden', !files.length);
@@ -349,7 +378,8 @@ export async function render(root, { id }, isCurrent) {
       const kerf = h('input', { type: 'number', min: '0', step: '0.05', value: '0', testid: 'export-kerf', inputmode: 'decimal' });
       const outline = h('input', { type: 'checkbox', testid: 'export-outline' });
       btn = h('button', { class: 'btn primary big block', testid: 'export-ruida' }, icon('export', 18), t('make_dxf'));
-      btn.addEventListener('click', () => doExport(btn, { target: 'ruida', kerf_mm: numVal(kerf) ?? 0, include_sheet_outline: outline.checked }));
+      lastBody = () => ({ target: 'ruida', kerf_mm: numVal(kerf) ?? 0, include_sheet_outline: outline.checked });
+      btn.addEventListener('click', () => doExport(btn, lastBody()));
       ctrls = [field(t('kerf_mm'), kerf), h('div', { class: 'checks' }, h('label', { class: 'check' }, outline, t('sheet_outline')))];
       toolSel = null;
     } else {
@@ -361,28 +391,41 @@ export async function render(root, { id }, isCurrent) {
       const tabW = h('input', { type: 'number', min: '0', step: '0.5', value: '6', testid: 'export-tab-width', inputmode: 'decimal' });
       const tabH = h('input', { type: 'number', min: '0', step: '0.1', value: '1.5', testid: 'export-tab-height', inputmode: 'decimal' });
       const climb = h('input', { type: 'checkbox', testid: 'export-climb', checked: true });
+      const leadIn = select({ testid: 'export-lead-in' }, [{ value: 'auto', label: t('lead_auto') },
+        { value: 'longest_edge_mid', label: t('lead_edge_mid') }], 'auto');
       btn = h('button', { class: 'btn primary big block', testid: 'export-ncstudio' }, icon('export', 18), t('make_gcode'));
-      btn.addEventListener('click', () => {
+      lastBody = () => {
         const body = { target: 'ncstudio', cut_tool_id: idNum(toolSel.value),
           cam: { cut_through_mm: numVal(through) ?? 0.3, tabs: tabs.checked, tab_width_mm: numVal(tabW) ?? 6,
-            tab_height_mm: numVal(tabH) ?? 1.5, climb: climb.checked } };
+            tab_height_mm: numVal(tabH) ?? 1.5, climb: climb.checked, lead_in: leadIn.value } };
         if (markSel.value) body.mark_tool_id = idNum(markSel.value);
-        doExport(btn, body);
-      });
+        return body;
+      };
+      btn.addEventListener('click', () => doExport(btn, lastBody()));
       ctrls = [field(t('cut_tool'), toolSel), field(t('mark_tool'), markSel), field(t('cut_through'), through),
-        field(t('tab_width'), tabW), field(t('tab_height'), tabH),
+        field(t('tab_width'), tabW), field(t('tab_height'), tabH), field(t('lead_in'), leadIn),
         h('div', { class: 'checks' }, h('label', { class: 'check' }, tabs, t('tabs')), h('label', { class: 'check' }, climb, t('climb')))];
     }
     exportBody.replaceChildren(
       h('p', { class: 'muted', testid: 'export-kind' }, isLaser() ? t('export_laser', { m: machine().name ?? '' }) : t('export_cnc', { m: machine().name ?? '' })),
       h('div', { class: 'grid-form two' }, ctrls),
-      h('div', { class: 'row' }, btn));
+      h('div', { class: 'checks' }, h('label', { class: 'check' }, acceptChk, t('accept_warnings'))),
+      h('div', { class: 'row' }, btn, checkBtn));
+    checksBox.replaceChildren();
     renderFiles();
   }
 
+  const checkBtn = h('button', { class: 'btn', testid: 'export-check' }, t('run_checks'));
+  checkBtn.addEventListener('click', () => busy(checkBtn, () => runChecks(lastBody && lastBody())));
+
   async function doExport(btn, body) {
+    if (btn.disabled) return;
+    body.accept_warnings = acceptChk.checked;
+    let ok = false;
     await busy(btn, async () => {
       const res = await api.post(`/jobs/${jid}/export`, body);
+      ok = true;
+      renderIssues(res?.issues || []);
       try { await reloadJob(); } catch { /* ignore */ }
       if (!(S.job.exports || []).length && res?.files) S.job.exports = res.files;
       updateStatus();
@@ -390,10 +433,12 @@ export async function render(root, { id }, isCurrent) {
       const ws = res?.warnings || [];
       if (ws.length) toast(ws.join(' '), 'warn'); else toast(t('files_ready', { n: (res?.files || []).length }), 'ok');
     }, t('making'));
+    if (!ok) await runChecks(body);     // refused: show what the checks found
   }
 
   const exportCard = panelSection({ title: t('export'), step: '3', testid: 'panel-export' },
     exportBody,
+    h('h3', {}, t('checks_title')), checksBox,
     h('h3', {}, t('files')), filesBox,
     h('div', { class: 'row wrap' }, zipLink, h('span', { class: 'grow' }), commitBtn));
 

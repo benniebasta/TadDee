@@ -64,6 +64,19 @@ const en = {
   relief_canvas_empty_title: 'No picture yet', relief_canvas_empty: 'Choose a picture to carve (PNG or JPG)',
   relief_regions_empty: 'Make the relief first; each colour of the picture then gets its own shape here.',
   relief_status_empty: 'Choose a picture, set the size, press Make relief', picture_and_size: 'Picture and size',
+  // export: entry moves, checks, revisions
+  lead_in: 'Start point (outside cuts)', lead_auto: 'Nearest corner', lead_edge_mid: 'Middle of the longest edge',
+  accept_warnings: 'Accept warnings and make the files', run_checks: 'Check', checks_title: 'Checks',
+  checks_ok: 'No problems found.', check_block: 'Stop', check_warn: 'Warning', rev_n: 'rev {n}', old_rev: 'old',
+  check_slot_too_narrow: 'Slot or gap narrower than the bit: it will not be cut',
+  check_corner_too_tight: 'Inside corner too tight for the bit: it will come out rounded',
+  check_hole_too_small: 'Hole smaller than the bit: it will not be cut',
+  check_small_part_no_tabs: 'Small part without tabs: it may move when it comes free',
+  check_outside_bed: 'Toolpath outside the machine bed',
+  check_too_deep: 'Cuts deeper than the material plus the spoil board limit',
+  check_bit_wider_than_gap: 'The bit is wider than the gap between parts: nest again with a bigger gap',
+  check_kerf_wider_than_gap: 'The kerf is wider than the gap between parts: nest again with a bigger gap',
+  ramp_mm: 'Ramp entry (mm)', ramp_hint: '0 = straight plunge',
 };
 
 const th = {
@@ -121,6 +134,19 @@ const th = {
   relief_canvas_empty_title: 'ยังไม่มีรูป', relief_canvas_empty: 'เลือกรูปที่จะแกะนูน (PNG หรือ JPG)',
   relief_regions_empty: 'กดสร้างงานนูนก่อน แล้วแต่ละสีในรูปจะมีรูปทรงของตัวเองที่นี่',
   relief_status_empty: 'เลือกรูป ตั้งขนาด แล้วกดสร้างงานนูน', picture_and_size: 'รูปและขนาด',
+  // export: entry moves, checks, revisions
+  lead_in: 'จุดเริ่มกัด (ตัดรอบนอก)', lead_auto: 'มุมที่ใกล้ที่สุด', lead_edge_mid: 'กลางด้านที่ยาวที่สุด',
+  accept_warnings: 'ยอมรับคำเตือนและสร้างไฟล์', run_checks: 'ตรวจสอบ', checks_title: 'การตรวจสอบ',
+  checks_ok: 'ไม่พบปัญหา', check_block: 'หยุด', check_warn: 'คำเตือน', rev_n: 'รุ่น {n}', old_rev: 'รุ่นเก่า',
+  check_slot_too_narrow: 'ร่องหรือช่องแคบกว่าดอกกัด: จะกัดไม่ได้',
+  check_corner_too_tight: 'มุมด้านในแคบเกินดอกกัด: มุมจะออกมาโค้งมน',
+  check_hole_too_small: 'รูเล็กกว่าดอกกัด: จะไม่ถูกกัด',
+  check_small_part_no_tabs: 'ชิ้นงานเล็กและไม่มีแท็บ: อาจขยับเมื่อตัดขาด',
+  check_outside_bed: 'เส้นทางกัดออกนอกโต๊ะเครื่อง',
+  check_too_deep: 'กัดลึกเกินความหนาวัสดุบวกขีดจำกัดแผ่นรอง',
+  check_bit_wider_than_gap: 'ดอกกัดกว้างกว่าระยะห่างระหว่างชิ้น: จัดวางใหม่ด้วยระยะห่างที่มากขึ้น',
+  check_kerf_wider_than_gap: 'ความกว้างลำเลเซอร์มากกว่าระยะห่างระหว่างชิ้น: จัดวางใหม่ด้วยระยะห่างที่มากขึ้น',
+  ramp_mm: 'ระยะลาดลงดอก (มม.)', ramp_hint: '0 = ลงดอกตรง',
 };
 
 const DICTS = { en, th };

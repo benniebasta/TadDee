@@ -32,12 +32,14 @@ const ENTITIES = [
       { name: 'feed_mm_min', id: 'feed', label: 'feed_mm_min', type: 'number', def: 3000, step: '10' },
       { name: 'plunge_mm_min', id: 'plunge', label: 'plunge_mm_min', type: 'number', def: 800, step: '10' },
       { name: 'rpm', id: 'rpm', label: 'rpm', type: 'number', def: 18000, step: '100', int: true },
+      { name: 'ramp_mm', id: 'ramp', label: 'ramp_mm', type: 'number', def: 12, step: '1', hint: 'ramp_hint' },
     ],
     cols: [
       ['name', (x) => x.name], ['diameter_mm', (x) => num(x.diameter_mm, 2), 'num'],
       ['kind', (x) => `${t(`kind_${x.kind}`, {}, x.kind)}${x.kind === 'vbit' && x.angle_deg ? ` ${num(x.angle_deg)}°` : ''}`],
       ['pass_depth_mm', (x) => num(x.pass_depth_mm, 2), 'num'], ['feed_mm_min', (x) => num(x.feed_mm_min), 'num'],
       ['plunge_mm_min', (x) => num(x.plunge_mm_min), 'num'], ['rpm', (x) => num(x.rpm), 'num'],
+      ['ramp_mm', (x) => num(x.ramp_mm ?? 12, 1), 'num'],
     ],
   },
   {

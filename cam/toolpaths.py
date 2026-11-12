@@ -9,6 +9,10 @@ What this module does, in plain words:
   (into the spoil board by cut_through_mm). Marks are one shallow level.
 - Levels deeper than the tab top on an outside profile leave small tabs so the part does not
   move when it comes free.
+- Entry moves (tool.ramp_mm > 0): instead of plunging straight down, the bit
+  ramps down along the path in a short zigzag at the start point (so every
+  level starts and ends there), or, on rings too short for that (small holes),
+  in a helix that follows the ring itself, so it never leaves the hole.
 - The result is a flat, already ordered list of ToolPath objects. The G-code
   writer only has to follow them.
 
@@ -39,6 +43,7 @@ class CamTool:
     plunge_mm_min: float = 800
     rpm: int = 18000
     pass_depth_mm: float = 3.0      # max depth per pass
+    ramp_mm: float = 0.0            # ramp entry length along the path; 0 = straight plunge
 
 
 @dataclass
@@ -53,6 +58,11 @@ class CamSettings:
     tab_min_part_mm: float = 0.0    # parts whose bbox min side is smaller get NO tabs (0 = all)
     engrave_depth_mm: float = 0.5   # for marks on layer engrave/score
     holes_first: bool = True
+    lead_in: str = "auto"           # outside start: "auto" (nearest bottom-left) | "longest_edge_mid"
+    ramp_max_angle_deg: float = 10.0  # steepest ramp; steeper steps get more zigzag legs / helix turns
+
+
+LEAD_INS = ("auto", "longest_edge_mid")
 
 
 @dataclass
@@ -194,6 +204,87 @@ def _with_tabs(ring: list[tuple[float, float]], level: float, tab_z: float,
     return out
 
 
+def _walk(closed: list[tuple[float, float]], length: float) -> list[tuple[float, float]]:
+    """Points along a closed ring from its start, for `length` mm of arc
+    (wrapping round as often as needed). The last point is interpolated."""
+    out = [closed[0]]
+    left = length
+    if left <= _EPS:
+        return out
+    while True:
+        for a, b in zip(closed, closed[1:]):
+            d = _dist(a, b)
+            if d <= _EPS:
+                continue
+            if d >= left - _EPS:
+                t = min(1.0, left / d)
+                out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+                return out
+            out.append(b)
+            left -= d
+
+
+def _slope(pts2: list[tuple[float, float]], z_from: float, z_to: float) -> list[tuple[float, float, float]]:
+    """2D polyline -> 3D, Z falling linearly with arc length from z_from to z_to."""
+    cum = [0.0]
+    for a, b in zip(pts2, pts2[1:]):
+        cum.append(cum[-1] + _dist(a, b))
+    total = cum[-1] or 1.0
+    return [(x, y, z_from + (z_to - z_from) * c / total) for (x, y), c in zip(pts2, cum)]
+
+
+def _entry(closed: list[tuple[float, float]], z_from: float, z_to: float, ramp_mm: float,
+           max_angle_deg: float, max_leg: float | None) -> tuple[list[tuple[float, float, float]], str]:
+    """Entry move from (start, z_from) down to (start, z_to), returning
+    (points, mode). Both ends are the ring's start point, so every level of a
+    ring starts and ends in the same place and the bit never lifts between
+    levels. Z never goes below z_to.
+
+    zigzag: forward along the ring for ramp_mm / 2 and back, repeated until
+            the slope is no steeper than max_angle_deg (the footprint stays
+            ramp_mm / 2 long, on the start edge, clear of the tabs).
+    helix:  rings shorter than 2 x ramp_mm (small holes): whole turns of the
+            ring itself while going down; the bit stays on the cut path, so
+            inside the hole.
+    plunge: no ramp (ramp_mm = 0, nothing to go down, or no room)."""
+    dz = z_from - z_to
+    if ramp_mm <= 0 or dz <= 1e-9:
+        return [(closed[0][0], closed[0][1], z_to)], "plunge"
+    tan_max = math.tan(math.radians(min(max(max_angle_deg, 1.0), 45.0)))
+    perim = sum(_dist(a, b) for a, b in zip(closed, closed[1:]))
+    if perim <= _EPS:
+        return [(closed[0][0], closed[0][1], z_to)], "plunge"
+    if perim >= 2 * ramp_mm:
+        leg = ramp_mm / 2.0
+        if max_leg is not None:
+            leg = min(leg, max_leg)
+        if leg >= 1.0:
+            fwd = _walk(closed, leg)
+            back = fwd[::-1]
+            legs = max(2, 2 * math.ceil(dz / (2 * leg * tan_max) - 1e-9))
+            pts2 = list(fwd)
+            for k in range(1, legs):
+                pts2 += (back if k % 2 else fwd)[1:]
+            return _slope(pts2, z_from, z_to), "zigzag"
+        if max_leg is not None:          # tabs too close to the start: plain plunge
+            return [(closed[0][0], closed[0][1], z_to)], "plunge"
+    turns = max(1, math.ceil(dz / (perim * tan_max) - 1e-9))
+    pts2 = list(closed)
+    for _ in range(turns - 1):
+        pts2 += closed[1:]
+    return _slope(pts2, z_from, z_to), "helix"
+
+
+def _longest_edge_mid(pts: list[tuple[float, float]]) -> tuple[list[tuple[float, float]], int]:
+    """Insert the middle of the longest straight edge of a (not closed) ring
+    as a vertex; return the new ring and that vertex's index."""
+    n = len(pts)
+    i = max(range(n), key=lambda k: (_dist(pts[k], pts[(k + 1) % n]), -k))
+    a, b = pts[i], pts[(i + 1) % n]
+    mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    return pts[:i + 1] + [mid] + pts[i + 1:], i + 1
+
+
 def _warn(warnings: list[str], msg: str) -> None:
     if msg not in warnings:
         warnings.append(msg)
@@ -220,6 +311,8 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
     holes_first=False: marks, then part by part, each part's holes before its
     outside). Inside each group: nearest neighbour starting from (0,0)."""
     warnings: list[str] = []
+    if s.lead_in not in LEAD_INS:
+        raise ValueError(f"Unknown lead-in {s.lead_in!r}: use one of {', '.join(LEAD_INS)}")
     r = cut_tool.diameter_mm / 2.0
     mtool = mark_tool or cut_tool
     total = s.thickness_mm + s.cut_through_mm
@@ -278,9 +371,12 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
                 continue
             for rp in _offset_rings(Polygon(epts), r):
                 pts = _orient(rp, outside_ccw)
+                if s.lead_in == "longest_edge_mid":
+                    pts, start = _longest_edge_mid(pts)
+                else:
+                    start = _closest_index(pts, (0.0, 0.0))
                 outs.append(_Ring(pts, "outside", pl.part_id, pl.copy,
-                                  tabs=tab_z is not None and big_enough,
-                                  fixed_start=_closest_index(pts, (0.0, 0.0))))
+                                  tabs=tab_z is not None and big_enough, fixed_start=start))
         for m in mlines:
             lines = list(m.geoms) if isinstance(m, MultiLineString) else [m]
             for ln in lines:
@@ -321,12 +417,21 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
                 _warn(warnings, f"Part {parts[ring.part_id].name} is too small for tabs, "
                                 f"cut without tabs (hold it down)")
                 count = 0
+        # the zigzag ramp must end before the first tab starts (never ramp through a tab)
+        max_leg = None
+        if count:
+            perim = sum(_dist(a, b) for a, b in zip(closed, closed[1:]))
+            max_leg = perim / count * 0.5 - tab_len / 2.0 - 0.5
+        z_prev = 0.0
         for k, z in enumerate(levels):
             if count and z < tab_z - 1e-9:
-                pts3 = _with_tabs(closed, z, tab_z, tab_len, count)
+                loop = _with_tabs(closed, z, tab_z, tab_len, count)
             else:
-                pts3 = [(x, y, z) for x, y in closed]
+                loop = [(x, y, z) for x, y in closed]
+            entry, _mode = _entry(closed, z_prev, z, cut_tool.ramp_mm, s.ramp_max_angle_deg, max_leg)
+            pts3 = entry + loop[1:] if len(entry) > 1 else loop
             paths.append(ToolPath(cut_tool.id, pts3, ring.kind, ring.part_id, ring.copy))
+            z_prev = z
         return closed[0]
 
     def start_dist(ring: _Ring, pos) -> float:
@@ -383,4 +488,4 @@ def sheet_toolpaths(sheet: SheetResult, parts: dict[str, Part], cut_tool: CamToo
     return paths, warnings
 
 
-__all__ = ["CamTool", "CamSettings", "ToolPath", "sheet_toolpaths"]
+__all__ = ["CamTool", "CamSettings", "ToolPath", "sheet_toolpaths", "LEAD_INS"]

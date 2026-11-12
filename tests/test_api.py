@@ -264,23 +264,31 @@ def test_full_flow(client):
     r = client.post(f"/api/jobs/{jid}/export", json={"target": "ruida", "kerf_mm": 0.1})
     assert r.status_code == 200, r.text
     dxf = r.json()["files"]
-    assert [x["name"] for x in dxf] == ["Flow_sheet01.dxf"]
+    assert [x["name"] for x in dxf] == ["Flow_sheet01_r2.dxf"]       # revision 2 of the job
     d = client.get(dxf[0]["url"])
     assert d.status_code == 200 and b"CUT" in d.content
     detail = client.get(f"/api/jobs/{jid}").json()
     assert detail["status"] == "exported"
-    assert sorted(x["name"] for x in detail["exports"]) == sorted(names + ["Flow_sheet01.dxf"])
+    assert sorted(x["name"] for x in detail["exports"]) == sorted(names + ["Flow_sheet01_r2.dxf"])
 
-    # exporting the same target again replaces its files, keeps the other target
+    # exporting the same target again makes revision 3; the old files stay listed, not current
     r = client.post(f"/api/jobs/{jid}/export", json={"target": "ncstudio", "cut_tool_id": cut["id"]})
-    assert len(r.json()["files"]) == 1
-    assert len(client.get(f"/api/jobs/{jid}").json()["exports"]) == 2
+    assert len(r.json()["files"]) == 1 and r.json()["revision"] == 3
+    exports = client.get(f"/api/jobs/{jid}").json()["exports"]
+    assert len(exports) == 4
+    current = sorted(x["name"] for x in exports if x["current"])
+    assert len(current) == 2 and any(n.endswith("_r3.nc") for n in current) and "Flow_sheet01_r2.dxf" in current
+    for x in exports:                                        # older revisions still download
+        assert client.get(x["url"]).status_code == 200
 
-    # zip
+    # zip: the current files; ?all=true: every revision in its rev folder
     z = client.get(f"/api/jobs/{jid}/export.zip")
     assert z.status_code == 200 and z.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
-        assert sorted(zf.namelist()) == sorted(x["name"] for x in client.get(f"/api/jobs/{jid}").json()["exports"])
+        assert sorted(zf.namelist()) == current
+    z = client.get(f"/api/jobs/{jid}/export.zip?all=true")
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        assert len(zf.namelist()) == 4 and all(n.startswith("rev00") for n in zf.namelist())
 
     # path traversal and unknown names
     for bad in ["..%2F..%2Fnest.db", "%2E%2E", "..nest.db", "%2E%2E%2Fnest.db", "a%5Cb.nc", "nest.db",
@@ -327,7 +335,7 @@ def test_full_flow(client):
     assert client.delete(f"/api/offcuts/{oc['id']}").status_code == 404
 
 
-def test_renest_clears_exports(client):
+def test_renest_keeps_old_exports_not_current(client):
     j = new_job(client, "Again")
     jid = j["id"]
     upload(client, jid, "tiny.svg", TINY_SVG)
@@ -337,10 +345,12 @@ def test_renest_clears_exports(client):
     r = client.post(f"/api/jobs/{jid}/nest", json={**FAST, "gap_mm": 8, "rotations": [0, 180]})
     assert r.status_code == 200
     d = client.get(f"/api/jobs/{jid}").json()
-    assert d["exports"] == [] and d["status"] == "nested"
+    # the old files are kept (proof of what was cut) but are no longer current
+    assert [x["name"] for x in d["exports"]] == [files[0]["name"]] and d["status"] == "nested"
+    assert all(x["current"] is False for x in d["exports"])
     assert d["settings"]["gap_mm"] == 8 and d["settings"]["rotations"] == [0, 180]
-    assert client.get(files[0]["url"]).status_code == 404
-    assert client.get(f"/api/jobs/{jid}/export.zip").status_code == 404
+    assert client.get(files[0]["url"]).status_code == 200
+    assert client.get(f"/api/jobs/{jid}/export.zip").status_code == 404     # nothing current
 
 
 def test_nest_too_big_part_and_sheet_override(client):

@@ -52,6 +52,7 @@ class ToolIn(_In):
     plunge_mm_min: float = Field(default=800, gt=0)
     rpm: int = Field(default=18000, gt=0)
     pass_depth_mm: float = Field(default=3.0, ge=0.1)
+    ramp_mm: float = Field(default=12.0, ge=0, le=200)     # ramp entry length; 0 = straight plunge
 
 
 class ToolUpdate(_In):
@@ -63,6 +64,7 @@ class ToolUpdate(_In):
     plunge_mm_min: float | None = Field(default=None, gt=0)
     rpm: int | None = Field(default=None, gt=0)
     pass_depth_mm: float | None = Field(default=None, ge=0.1)
+    ramp_mm: float | None = Field(default=None, ge=0, le=200)
 
 
 class ToolOut(BaseModel):
@@ -75,6 +77,39 @@ class ToolOut(BaseModel):
     plunge_mm_min: float
     rpm: int
     pass_depth_mm: float
+    ramp_mm: float
+
+
+# ---------- feeds and speeds (material x bit) ----------
+
+class FeedIn(_In):
+    material_id: int
+    tool_id: int
+    feed_mm_min: float | None = Field(default=None, gt=0)
+    plunge_mm_min: float | None = Field(default=None, gt=0)
+    rpm: int | None = Field(default=None, gt=0)
+    pass_depth_mm: float | None = Field(default=None, ge=0.1)
+    notes: str = ""
+
+
+class FeedUpdate(_In):
+    """PUT body: a field sent as null clears that override (back to the bit default)."""
+    feed_mm_min: float | None = Field(default=None, gt=0)
+    plunge_mm_min: float | None = Field(default=None, gt=0)
+    rpm: int | None = Field(default=None, gt=0)
+    pass_depth_mm: float | None = Field(default=None, ge=0.1)
+    notes: str | None = None
+
+
+class FeedOut(BaseModel):
+    id: int
+    material_id: int
+    tool_id: int
+    feed_mm_min: float | None
+    plunge_mm_min: float | None
+    rpm: int | None
+    pass_depth_mm: float | None
+    notes: str
 
 
 class MaterialIn(_In):
@@ -244,6 +279,9 @@ class FileOut(BaseModel):
     tool: str | None = None
     target: str | None = None     # "ncstudio" | "ruida" (relief files: None)
     sheet: int | None = None      # 1-based sheet number
+    revision: int | None = None   # export revision of the job (1, 2, ...); None for relief files
+    current: bool = True          # False: an older revision, or made before the latest nest
+    created_at: str | None = None
 
 
 class CamIn(_In):
@@ -256,6 +294,8 @@ class CamIn(_In):
     tab_min_part_mm: float | None = Field(default=None, ge=0)
     engrave_depth_mm: float | None = Field(default=None, ge=0)
     holes_first: bool | None = None
+    lead_in: Literal["auto", "longest_edge_mid"] | None = None
+    ramp_max_angle_deg: float | None = Field(default=None, ge=1, le=45)
 
 
 class ExportIn(_In):
@@ -265,11 +305,50 @@ class ExportIn(_In):
     cam: CamIn | None = None
     kerf_mm: float | None = Field(default=None, ge=0, le=5)
     include_sheet_outline: bool | None = None    # ruida only
+    accept_warnings: bool = False                # make the files although checks found warnings
+
+
+class ChecksQuery(_In):
+    """GET /jobs/{id}/checks query: the same choices as the export body."""
+    target: Literal["ncstudio", "ruida"] | None = None   # default: by the job's machine kind
+    cut_tool_id: int | None = None
+    mark_tool_id: int | None = None
+    kerf_mm: float | None = Field(default=None, ge=0, le=5)
+    cut_through_mm: float | None = Field(default=None, ge=0, le=5)
+    safe_z: float | None = Field(default=None, gt=0, le=100)
+    climb: bool | None = None
+    tabs: bool | None = None
+    tab_width_mm: float | None = Field(default=None, ge=0)
+    tab_height_mm: float | None = Field(default=None, ge=0)
+    tab_min_part_mm: float | None = Field(default=None, ge=0)
+    engrave_depth_mm: float | None = Field(default=None, ge=0)
+    holes_first: bool | None = None
+    lead_in: Literal["auto", "longest_edge_mid"] | None = None
+    ramp_max_angle_deg: float | None = Field(default=None, ge=1, le=45)
+
+
+class CheckIssue(BaseModel):
+    code: str
+    severity: Literal["block", "warn"]
+    message: str
+    part_id: str | None
+    sheet: int | None
+    x: float | None
+    y: float | None
+
+
+class ChecksOut(BaseModel):
+    target: str
+    issues: list[CheckIssue]
+    blocks: int
+    warns: int
 
 
 class ExportOut(BaseModel):
     files: list[FileOut]
     warnings: list[str]
+    revision: int | None = None
+    issues: list[CheckIssue] = []                # warnings the request accepted
 
 
 class JobDetail(BaseModel):
