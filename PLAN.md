@@ -268,3 +268,79 @@ Views and **required `data-testid`s** (the e2e test depends on them, do not rena
 3. Integration review: run all tests, run the app, read every module boundary against section 4, fix mismatches.
 4. E2E browser tests of all features, screenshots.
 5. Repo push when Bennie names the repo; install on TANINP after his yes.
+
+---
+
+# Part 2. Production completion plan (2026-11-13)
+
+**Where we are.** v1 works end to end in the test bench: import, true-shape nesting, NC Studio G-code, Ruida DXF, offcuts, cost, 3D relief, EN/TH workspace UI. 108 tests and an 18-step browser test pass. It has **never run on the real router or laser**, is not installed anywhere, has no login, no backup and no link to the ERP.
+**Production quality means:** an operator can use it every day without me, a wrong file cannot reach a machine silently, nothing is lost if the PC dies, and every number on screen is one the shop can trust.
+
+Order matters: P1 before anything else (real machines decide the rest). P2 and P3 can run side by side. P6 waits for the ERP cutover on 1 Dec.
+
+## P1. Prove it on the real machines (blocker for everything)
+| # | Work | Done when |
+|---|---|---|
+| 1.1 | Repo created, code pushed, installed on TANINP (run.bat), reachable over Tailscale on :8040 | Bennie opens it from his phone |
+| 1.2 | NC Studio post check with one real file: header, units, arcs vs short lines, line endings, file extension, end-of-program, max line count | File loads in NC Studio with no warning and the on-screen path matches our preview |
+| 1.3 | Air cut (bit above the sheet), then one cut in scrap: 100 × 100 mm square + 50 mm circle + one letter | Measured size within ±0.2 mm; tabs hold; holes cut before outlines |
+| 1.4 | Ruida: DXF opened in the laser software, layer colours map to cut / score / engrave, scale 1:1 | Same test pieces within ±0.1 mm after the kerf setting |
+| 1.5 | Relief: sample sign in foam or MDF with the shop's real bits | Depth and shape match the preview, no gouge, time within 20% of the estimate |
+| 1.6 | Write the findings into machine profiles (post options per machine instead of fixed code) | Profiles saved, tests updated with the real file as a golden sample |
+
+## P2. Close the function gaps (from the ENUT comparison, section 9 of the living doc)
+| # | Work | Notes |
+|---|---|---|
+| 2.1 | Rotation: none, 30°, free (10° steps); grain lock per material | "None/180" forced for grain materials |
+| 2.2 | Ramp entry (default 12 mm, along the path) and helical entry for small holes; lead-in position choice | Replaces straight plunge; option per tool |
+| 2.3 | Thorough search: 40 s, custom up to 5 min, fine resolution 0.5 / 0.25 mm; runs as a background job with progress and Cancel | Needs 3.1 |
+| 2.4 | Number of sets, mirror part, keep colours/materials on separate sheets | Colour read from the artwork |
+| 2.5 | Nest into a hand-drawn remnant (any outline) and register a remnant by size from the phone | Uses the offcut store |
+| 2.6 | Checks before export: corner too tight for the bit, slot narrower than the bit, part smaller than the tab rule, path outside the bed, Z below spoilboard limit | Shown on the canvas in red, export blocked or needs a tick |
+| 2.7 | G-code simulator on the canvas: play, scrub, show rapid moves, per-pass depth colour, time | Reads our own file back, so it also tests the writer |
+| 2.8 | Presets: letters/acrylic, panels, grain, max density | One click fills the nest settings |
+| 2.9 | Feeds and speeds library: material × bit → feed, plunge, rpm, pass depth | Filled from the shop's real numbers (P1) |
+| 2.10 | PDF and AI (PDF-compatible) import; text-not-outlined warning | SVG/DXF stay the safe path |
+
+## P3. Make it reliable
+| # | Work | Done when |
+|---|---|---|
+| 3.1 | Job queue: nesting and relief run in a worker, survive a browser close, one at a time per machine, progress shown | Close the tab mid-nest, reopen, result is there |
+| 3.2 | Database migrations (Alembic) and a schema version check at start | Upgrade keeps old jobs |
+| 3.3 | Export revisions: every export gets a number, old files kept, the file header carries job, sheet, revision, bit, material, date | Operator can prove which file was cut |
+| 3.4 | Daily backup of the database and job files to `D:\Site backups\nest` (keep 14), plus a restore test | Restore on a clean folder passes |
+| 3.5 | Logging to file with rotation, a health page, clear error messages in EN/TH, upload limits, clean-up of files older than 90 days (never offcuts or cut jobs) | No silent failures |
+| 3.6 | Duplicate job, undo delete (30-day bin), lock a job after "Mark as cut" | No lost work by a wrong tap |
+
+## P4. Access and safety
+| # | Work | Notes |
+|---|---|---|
+| 4.1 | Login with two roles: operator (jobs, nest, export) and admin (machines, bits, materials, prices) | Only on Tailscale/LAN; no public exposure |
+| 4.2 | Audit trail: who nested, exported, marked as cut, changed a bit or price | Shown on the job |
+| 4.3 | Export sign-off: a checklist tick (bit fitted, sheet size, zero set) before download | Wording to confirm with the operators |
+| 4.4 | Security review of upload parsing (SVG/DXF/PDF/images), path handling and dependencies | Report with fixes |
+
+## P5. Deploy and hand over
+| # | Work | Done when |
+|---|---|---|
+| 5.1 | Runs as a Windows service on TANINP, starts with the PC, restarts on crash | Reboot test passes |
+| 5.2 | One-command update with automatic backup first and roll-back | Update and roll-back both tested |
+| 5.3 | Automated tests on every push (unit, API, browser) + golden G-code/DXF samples from P1 + a benchmark set of 10 real jobs | Fails the push if a G-code byte changes without approval |
+| 5.4 | Speed targets: 200 parts nested in under 30 s on TANINP; UI opens a 50-sheet job smoothly on the phone | Measured and recorded |
+| 5.5 | Thai operator manual (one doc) and a 20-minute walk-through with the operators | Operators run a real job alone |
+| 5.6 | Two-week parallel run beside the current way of working; issue list closed | Bennie's go-live yes |
+
+## P6. Link to the ERP (after the 1 Dec cutover)
+ERP job number on the nest job, materials and prices from the ERP, sheets and offcuts posted to stock, cutting time and cost back to the job. Read-only first, write after one clean week.
+
+## Out of scope
+ENUT's design tools (die-cut stickers, LED layout, letter pricing, plaques, QR, eyelets, edge unroll), automatic tool changer, writing Ruida `.rd` files directly, selling the app to other shops.
+
+## Risks
+1. NC Studio or the laser software reads our files differently from the spec; only P1 answers this.
+2. Feeds, speeds and tab sizes are shop knowledge; wrong values break bits. Start slow, record what works.
+3. Nesting density on real letter jobs may trail ENUT; the benchmark set (5.3) measures it before go-live.
+4. TANINP is a single PC; the backup (3.4) is the only safety net.
+
+## Needed from Bennie
+1. Name of a new empty GitHub repo. 2. Yes to install on TANINP. 3. Five real job files and the usual sheet sizes and materials. 4. Bit list on the router and the exact laser software name. 5. Who will use it (names for logins). 6. A half-day slot at the factory for the P1 tests.
