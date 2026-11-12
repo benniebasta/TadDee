@@ -218,7 +218,7 @@ def test_full_flow(client):
     r = client.post(f"/api/jobs/{jid}/nest", json={**FAST, "time_limit_s": 999, "gap_mm": 7})
     assert r.status_code == 200, r.text
     nest = r.json()
-    assert set(nest) == {"sheets", "unplaced", "utilisation", "sheets_used", "attempts", "elapsed_s", "cost"}
+    assert set(nest) == {"sheets", "unplaced", "utilisation", "sheets_used", "attempts", "elapsed_s", "cost", "meta"}
     assert nest["sheets_used"] == len(nest["sheets"]) == 1
     sh = nest["sheets"][0]
     assert set(sh) == {"index", "sheet_id", "width", "height", "is_offcut", "utilisation", "parts_count",
@@ -232,7 +232,7 @@ def test_full_flow(client):
     assert nest["cost"]["cut_minutes"] > 0
     detail = client.get(f"/api/jobs/{jid}").json()
     assert detail["status"] == "nested" and detail["nest"]["sheets_used"] == 1
-    assert detail["settings"]["time_limit_s"] == 60          # capped
+    assert detail["settings"]["time_limit_s"] == 300         # capped
     assert client.get("/api/jobs").json()[0]["sheets"] == 1
 
     # CNC G-code
@@ -300,7 +300,7 @@ def test_full_flow(client):
     listed = client.get(f"/api/offcuts?material_id={j['material_id']}").json()
     assert [o["id"] for o in listed] == [oc["id"]]
     assert set(listed[0]) == {"id", "material_id", "width", "height", "outline_wkt", "source_job_id",
-                              "created_at", "used"}
+                              "created_at", "used", "name", "irregular", "holes"}
     other = by_name(client.get("/api/materials").json(), "MDF 18 mm")
     assert client.get(f"/api/offcuts?material_id={other['id']}").json() == []
 

@@ -7,15 +7,35 @@ import { idNum } from './jobs.js';
 
 // Nest option tables (values are stable for tests; labels are translated).
 const ROTATIONS = [
+  { value: 'none', angles: [0], key: 'rot_none' },
   { value: '0/180', angles: [0, 180], key: 'rot_0_180' },
   { value: '0/90/180/270', angles: [0, 90, 180, 270], key: 'rot_90' },
   { value: 'every45', angles: range(0, 360, 45), key: 'rot_45' },
+  { value: 'every30', angles: range(0, 360, 30), key: 'rot_30' },
   { value: 'every15', angles: range(0, 360, 15), key: 'rot_15' },
+  { value: 'free', angles: range(0, 360, 10), key: 'rot_free' },
 ];
+// Fast must stay first (e2e picks index 0). custom: seconds typed in (max 300).
 const QUALITY = [
   { value: 'fast', resolution_mm: 3, time_limit_s: 5, key: 'q_fast' },
   { value: 'normal', resolution_mm: 2, time_limit_s: 10, key: 'q_normal' },
   { value: 'fine', resolution_mm: 1, time_limit_s: 30, key: 'q_fine' },
+  { value: 'thorough', resolution_mm: 1, time_limit_s: 40, key: 'q_thorough' },
+  { value: 'custom', resolution_mm: 1, time_limit_s: null, key: 'q_custom' },
+];
+const MAX_TIME_S = 300;
+// Grid cell size; 'auto' = the quality's own. Big sheets are coarsened by the server (see nest meta).
+const RESOLUTIONS = [
+  { value: 'auto', key: 'res_auto' }, { value: '3', mm: 3 }, { value: '2', mm: 2 }, { value: '1', mm: 1 },
+  { value: '0.5', mm: 0.5 }, { value: '0.25', mm: 0.25, key: 'res_small' },
+];
+// One click fills the nest fields; editing any field afterwards switches back to custom.
+const PRESETS = [
+  { value: 'custom', key: 'preset_custom' },
+  { value: 'letters', key: 'preset_letters', gap: 7, rotations: 'free', holes: true, quality: 'fine', resolution: 'auto' },
+  { value: 'panels', key: 'preset_panels', rotations: '0/90/180/270', quality: 'normal', resolution: 'auto' },
+  { value: 'grain', key: 'preset_grain', rotations: '0/180', quality: 'normal', resolution: 'auto' },
+  { value: 'density', key: 'preset_density', rotations: 'free', quality: 'thorough', resolution: '0.5' },
 ];
 function range(a, b, s) { const r = []; for (let x = a; x < b; x += s) r.push(x); return r; }
 const countOf = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
@@ -65,6 +85,7 @@ export async function render(root, { id }, isCurrent) {
       S.job = j && j.id !== undefined ? j : await reloadJob();
       updateStatus();
       if (!S.gapTouched) gapIn.value = defaultGap();
+      showGrain();
       renderNestResult();
       renderExport();
       toast(t('saved'), 'ok');
@@ -164,9 +185,20 @@ export async function render(root, { id }, isCurrent) {
         renderParts();
       }, ' '));
       const marks = countOf(p.marks);
+      const mirror = h('input', { type: 'checkbox', testid: 'part-mirror', checked: Boolean(p.mirror), 'aria-label': t('mirror') });
+      mirror.addEventListener('change', async () => {
+        mirror.disabled = true;
+        try {
+          const r = await api.patch(`/jobs/${jid}/parts/${encodeURIComponent(p.id)}`, { mirror: mirror.checked });
+          p.mirror = Boolean(r?.mirror ?? mirror.checked);
+        } catch (e) { toastError(e); mirror.checked = Boolean(p.mirror); } finally { mirror.disabled = false; }
+      });
+      const swatch = p.color ? h('span', { class: 'swatch', testid: 'part-color', title: p.color,
+        style: `display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #8888;vertical-align:middle;margin-right:6px;background:${/^#[0-9a-f]{6}$/i.test(p.color) ? p.color : 'transparent'}` }) : null;
       return h('tr', { testid: 'part-row', 'data-id': p.id },
         h('td', { class: 'thumb-cell' }, svgBox(p.svg, 'thumb')),
-        h('td', {}, h('div', {}, p.name), marks ? h('div', { class: 'muted small' }, t('marks_n', { n: marks, layer: p.mark_layer ?? '' })) : null),
+        h('td', {}, h('div', {}, swatch, p.name), marks ? h('div', { class: 'muted small' }, t('marks_n', { n: marks, layer: p.mark_layer ?? '' })) : null,
+          h('label', { class: 'check small' }, mirror, t('mirror'))),
         h('td', { class: 'num nowrap' }, `${num(p.width, 1)} × ${num(p.height, 1)}`),
         h('td', { class: 'num hide-sm' }, countOf(p.holes)),
         h('td', {}, qty),
@@ -194,13 +226,49 @@ export async function render(root, { id }, isCurrent) {
 
   const gapIn = h('input', { type: 'number', min: '0', step: '0.5', testid: 'nest-gap', inputmode: 'decimal' });
   gapIn.addEventListener('input', () => { S.gapTouched = true; });
-  const rotMatch = S.job.nest && Array.isArray(st.rotations)
+  const nested = Boolean(S.job.nest);
+  const rotMatch = nested && Array.isArray(st.rotations)
     ? ROTATIONS.find((r) => r.angles.length === st.rotations.length && r.angles.every((a, i) => Number(st.rotations[i]) === a)) : null;
   const rotSel = select({ testid: 'nest-rotations' }, ROTATIONS.map((r) => ({ value: r.value, label: t(r.key) })), rotMatch?.value ?? '0/90/180/270');
-  const qMatch = S.job.nest && QUALITY.find((q) => q.resolution_mm === Number(st.resolution_mm));
+  const qMatch = nested ? (QUALITY.find((q) => q.time_limit_s === Number(st.time_limit_s)) || QUALITY.find((q) => q.value === 'custom')) : null;
   const qualSel = select({ testid: 'nest-quality' }, QUALITY.map((q) => ({ value: q.value, label: t(q.key) })), qMatch?.value ?? 'normal');
+  const timeIn = h('input', { type: 'number', min: '1', max: String(MAX_TIME_S), step: '1', testid: 'nest-time', inputmode: 'numeric',
+    value: String(nested && st.time_limit_s != null ? st.time_limit_s : 60) });
+  const timeField = field(t('search_s'), timeIn, t('search_hint', { n: MAX_TIME_S }));
+  const resMatch = nested && qMatch && Number(st.resolution_mm) !== qMatch.resolution_mm
+    ? RESOLUTIONS.find((r) => r.mm === Number(st.resolution_mm)) : null;
+  const resSel = select({ testid: 'nest-resolution' }, RESOLUTIONS.map((r) => ({ value: r.value, label: r.key ? (r.mm ? `${r.mm} mm · ${t(r.key)}` : t(r.key)) : `${r.mm} mm` })), resMatch?.value ?? 'auto');
+  const presetSel = select({ testid: 'nest-preset' }, PRESETS.map((p) => ({ value: p.value, label: t(p.key) })),
+    nested && PRESETS.some((p) => p.value === st.preset) ? st.preset : 'custom');
+  const setsIn = h('input', { type: 'number', min: '1', max: '100', step: '1', testid: 'nest-sets', inputmode: 'numeric', value: String(st.sets ?? 1) });
+  const colorsChk = h('input', { type: 'checkbox', testid: 'nest-colors', checked: st.separate_colors ?? false });
+  const grainNote = h('p', { class: 'muted small hidden', testid: 'nest-grain-note' }, t('grain_note'));
   const holesChk = h('input', { type: 'checkbox', testid: 'nest-holes', checked: st.allow_in_holes ?? true });
   const offcutChk = h('input', { type: 'checkbox', testid: 'nest-offcuts', checked: st.use_offcuts ?? false });
+  const showTime = () => timeField.classList.toggle('hidden', qualSel.value !== 'custom');
+  const showGrain = () => grainNote.classList.toggle('hidden', !material().grain);
+  showTime();
+  showGrain();
+  // preset -> fields; any manual edit -> preset "custom"
+  let applying = false;
+  presetSel.addEventListener('change', () => {
+    const p = PRESETS.find((x) => x.value === presetSel.value);
+    if (!p || p.value === 'custom') return;
+    applying = true;
+    if (p.gap != null) { gapIn.value = String(p.gap); S.gapTouched = true; } else if (!S.gapTouched) gapIn.value = defaultGap();
+    if (p.rotations) rotSel.value = p.rotations;
+    if (p.quality) qualSel.value = p.quality;
+    if (p.resolution) resSel.value = p.resolution;
+    if (p.holes != null) holesChk.checked = p.holes;
+    showTime();
+    applying = false;
+  });
+  for (const el of [gapIn, rotSel, qualSel, resSel, timeIn, holesChk]) {
+    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', () => {
+      if (!applying) presetSel.value = 'custom';
+      if (el === qualSel) showTime();
+    });
+  }
   const sheetW = h('input', { type: 'number', min: '1', step: '1', testid: 'nest-sheet-w', inputmode: 'decimal' });
   const sheetH = h('input', { type: 'number', min: '1', step: '1', testid: 'nest-sheet-h', inputmode: 'decimal' });
   const nestBtn = h('button', { class: 'btn primary big block', testid: 'nest-run' }, icon('nest', 18), t('nest'));
@@ -217,15 +285,24 @@ export async function render(root, { id }, isCurrent) {
   nestBtn.addEventListener('click', () => busy(nestBtn, async () => {
     await flushQty();
     const q = QUALITY.find((x) => x.value === qualSel.value) || QUALITY[1];
-    const r = ROTATIONS.find((x) => x.value === rotSel.value) || ROTATIONS[1];
+    const r = ROTATIONS.find((x) => x.value === rotSel.value) || ROTATIONS[2];
+    const res = RESOLUTIONS.find((x) => x.value === resSel.value);
+    let secs = q.time_limit_s;
+    if (secs == null) {
+      secs = numVal(timeIn);
+      if (!secs || secs < 1 || secs > MAX_TIME_S) throw new Error(t('err_search_s', { n: MAX_TIME_S }));
+    }
+    const sets = Math.round(numVal(setsIn) ?? 1);
+    if (!Number.isFinite(sets) || sets < 1 || sets > 100) throw new Error(t('err_sets'));
     const body = { gap_mm: numVal(gapIn) ?? defaultGap(), rotations: r.angles, allow_in_holes: holesChk.checked,
-      resolution_mm: q.resolution_mm, time_limit_s: q.time_limit_s, use_offcuts: offcutChk.checked };
+      resolution_mm: res?.mm ?? q.resolution_mm, time_limit_s: secs, use_offcuts: offcutChk.checked,
+      sets, separate_colors: colorsChk.checked, preset: presetSel.value };
     const w = numVal(sheetW), hh = numVal(sheetH);
     if (w) body.sheet_w = w;
     if (hh) body.sheet_h = hh;
-    const res = await api.post(`/jobs/${jid}/nest`, body);
+    const out = await api.post(`/jobs/${jid}/nest`, body);
     try { await reloadJob(); } catch { /* keep old job */ }
-    if (res && Array.isArray(res.sheets)) S.job.nest = res;
+    if (out && Array.isArray(out.sheets)) S.job.nest = out;
     if (!S.job.exports) S.job.exports = [];
     updateStatus();
     renderNestResult();
@@ -265,7 +342,8 @@ export async function render(root, { id }, isCurrent) {
     fill(nestResult, summary,
       unplaced.length ? h('div', { class: 'warnings', testid: 'nest-unplaced' }, h('strong', {}, t('unplaced_parts')),
         h('ul', {}, unplaced.map((u) => h('li', {}, `${u.name ?? u.part_id} × ${u.count}`)))) : null,
-      nest.attempts != null ? h('p', { class: 'muted small' }, t('nest_meta', { a: nest.attempts, s: num(nest.elapsed_s, 1) })) : null);
+      nest.attempts != null ? h('p', { class: 'muted small' }, t('nest_meta', { a: nest.attempts, s: num(nest.elapsed_s, 1) })) : null,
+      metaNotes(nest.meta));
     if (S.active >= nest.sheets.length) S.active = 0;
     renderStrip();
     renderCanvas();
@@ -293,21 +371,41 @@ export async function render(root, { id }, isCurrent) {
     }));
   }
 
+  // plain sentences about how the nest ran (grain lock, coarser grid, stopped early)
+  function metaNotes(meta) {
+    if (!meta) return null;
+    const notes = [];
+    if (meta.grain_locked) notes.push(t('meta_grain'));
+    if (meta.resolution_mm && meta.resolution_requested && meta.resolution_mm > meta.resolution_requested + 1e-9) {
+      notes.push(t('meta_res', { r: num(meta.resolution_mm, 2), q: num(meta.resolution_requested, 2) }));
+    }
+    if (meta.stopped === 'cancel') notes.push(t(meta.complete === false ? 'meta_cancel_partial' : 'meta_cancel'));
+    if (Number(meta.sets) > 1) notes.push(t('meta_sets', { n: meta.sets }));
+    if (meta.separate_colors) notes.push(t('meta_colors'));
+    return notes.length ? h('ul', { class: 'muted small', testid: 'nest-meta' }, notes.map((n) => h('li', {}, n))) : null;
+  }
+
   function stat(label, value, testid, cls = '') {
     return h('div', { class: `stat ${cls}`, testid }, h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value));
   }
 
   const nestCard = panelSection({ title: t('nest'), step: '2', testid: 'panel-nest' },
     h('div', { class: 'grid-form two' },
+      field(t('preset'), presetSel, t('preset_hint')),
+      h('span'),
       field(t('gap_mm'), gapIn, t('gap_hint')),
       field(t('rotations'), rotSel),
       field(t('quality'), qualSel),
-      h('span'),
+      field(t('resolution'), resSel),
+      timeField,
+      field(t('sets'), setsIn, t('sets_hint')),
       field(t('sheet_w'), sheetW, t('sheet_hint')),
       field(t('sheet_h'), sheetH)),
+    grainNote,
     h('div', { class: 'checks' },
       h('label', { class: 'check' }, holesChk, t('parts_in_holes')),
-      h('label', { class: 'check' }, offcutChk, t('use_offcuts'))),
+      h('label', { class: 'check' }, offcutChk, t('use_offcuts')),
+      h('label', { class: 'check' }, colorsChk, t('separate_colors'))),
     h('div', { class: 'row' }, nestBtn),
     nestResult);
 

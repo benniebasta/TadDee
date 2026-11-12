@@ -23,6 +23,8 @@ class Part:
     marks: list[LineString] = field(default_factory=list)  # open lines inside the part (score/engrave), same frame as shape
     mark_layer: str = "engrave"                            # layer of the marks: score | engrave
     source: str = ""                                       # file name it came from
+    mirror: bool = False                                   # cut it mirrored (flipped left-right) everywhere
+    color: str = ""                                        # "#rrggbb" from the artwork (fill, else stroke), "" = unknown
 
     @property
     def area(self) -> float:
@@ -66,17 +68,21 @@ class NestSettings:
     time_limit_s: float = 10.0               # stop trying new orders after this
     seed: int = 1                            # same seed + same input = same layout
     min_offcut_mm: float = 150.0             # leftover strips narrower than this are waste
+    separate_colors: bool = False            # parts of different Part.color never share a sheet
+    max_grid_cells: int = 12_000_000         # finer resolutions are coarsened so one sheet grid stays this small
 
 
 @dataclass
 class Placement:
-    """Where one copy of a part goes: rotate about (0,0) by rotation degrees
-    (counter-clockwise), then translate by (x, y). Use place() to apply."""
+    """Where one copy of a part goes: if mirror, flip x -> -x about (0,0) first;
+    then rotate about (0,0) by rotation degrees (counter-clockwise), then
+    translate by (x, y). Use place() / placed_part() to apply."""
     part_id: str
     copy: int          # 0..qty-1
     x: float
     y: float
     rotation: float
+    mirror: bool = False
 
 
 @dataclass
@@ -99,16 +105,25 @@ class NestResult:
     utilisation: float         # total used area / total area of used sheets
     elapsed_s: float
     attempts: int = 1
+    # How the run went: resolution_mm (used), resolution_requested, rotations (used),
+    # stopped ("done" | "time" | "cancel" | "exhausted"), complete (False only when
+    # cancelled during the first layout: the rest is in unplaced), separate_colors.
+    meta: dict = field(default_factory=dict)
 
 
-def place(geom: BaseGeometry, rotation: float, x: float, y: float) -> BaseGeometry:
-    """THE transform for a Placement. Every module must use this."""
-    g = affinity.rotate(geom, rotation, origin=(0, 0), use_radians=False) if rotation else geom
+def place(geom: BaseGeometry, rotation: float, x: float, y: float, mirror: bool = False) -> BaseGeometry:
+    """THE transform for a Placement. Every module must use this.
+    mirror flips x -> -x about (0,0) before the rotation (ring orientation is
+    reversed by the flip; CAM re-orients rings itself)."""
+    g = affinity.scale(geom, -1.0, 1.0, origin=(0, 0)) if mirror else geom
+    g = affinity.rotate(g, rotation, origin=(0, 0), use_radians=False) if rotation else g
     return affinity.translate(g, x, y)
 
 
 def placed_part(part: Part, pl: Placement) -> tuple[Polygon, list[LineString]]:
-    return place(part.shape, pl.rotation, pl.x, pl.y), [place(m, pl.rotation, pl.x, pl.y) for m in part.marks]
+    m = bool(getattr(pl, "mirror", False))
+    return (place(part.shape, pl.rotation, pl.x, pl.y, m),
+            [place(g, pl.rotation, pl.x, pl.y, m) for g in part.marks])
 
 
 __all__ = ["LAYERS", "Part", "SheetSpec", "NestSettings", "Placement", "SheetResult", "NestResult",

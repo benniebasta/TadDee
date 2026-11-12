@@ -47,6 +47,7 @@ class Material(Base):
     sheet_h: Mapped[float] = mapped_column(Float)
     price_per_sheet: Mapped[float] = mapped_column(Float, default=0.0)  # THB, excl. VAT; 0 = not set
     margin_mm: Mapped[float] = mapped_column(Float, default=10.0)
+    grain: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # grain/brushed: 0/180 only
 
 
 class Job(Base):
@@ -72,6 +73,8 @@ class JobPart(Base):
     marks_wkt: Mapped[str] = mapped_column(Text, default="[]")  # JSON list of LINESTRING WKT
     mark_layer: Mapped[str] = mapped_column(String(10), default="engrave")
     source: Mapped[str] = mapped_column(String(300), default="")
+    mirror: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    color: Mapped[str] = mapped_column(String(16), default="", server_default="")   # "#rrggbb" from the artwork
 
 
 class NestRun(Base):
@@ -93,6 +96,7 @@ class Offcut(Base):
     source_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
+    name: Mapped[str] = mapped_column(String(200), default="", server_default="")   # e.g. the uploaded file name
 
 
 class ReliefRun(Base):

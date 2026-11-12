@@ -22,7 +22,7 @@ from .db import Database, default_data_dir, get_database, session_scope
 from .models import Job, JobPart, Machine, Material, Offcut, ReliefRun, Tool
 from .schemas import (CommitOut, ExportIn, ExportOut, JobCreate, JobDetail, JobListItem, JobUpdate,
                       MachineIn, MachineOut, MachineUpdate, MaterialIn, MaterialOut, MaterialUpdate, NestIn,
-                      NestOut, OffcutOut, PartOut, PartUpdate, ReliefIn, ReliefOut, ToolIn, ToolOut, ToolUpdate,
+                      NestOut, OffcutCreate, OffcutOut, OffcutUploadOut, PartOut, PartUpdate, ReliefIn, ReliefOut, ToolIn, ToolOut, ToolUpdate,
                       UploadOut)
 from .seed import seed
 
@@ -174,6 +174,15 @@ def build_router() -> APIRouter:
         if used is not None:
             q = q.where(Offcut.used.is_(used))
         return [sv.offcut_out(o) for o in s.scalars(q)]
+
+    @r.post("/offcuts", response_model=OffcutOut, status_code=201)
+    def create_offcut(body: OffcutCreate, s: S):
+        return sv.offcut_out(sv.create_offcut(s, body.material_id, body.width, body.height, body.name))
+
+    @r.post("/offcuts/upload", response_model=OffcutUploadOut, status_code=201)
+    def upload_offcut(s: S, material_id: int = Form(...), file: UploadFile = File(...)):
+        o, warnings = sv.upload_offcut(s, material_id, file)
+        return {**sv.offcut_out(o), "warnings": warnings}
 
     @r.delete("/offcuts/{oid}", status_code=204)
     def delete_offcut(oid: int, s: S):

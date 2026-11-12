@@ -40,12 +40,35 @@ class Database:
     def create_all(self) -> None:
         from . import models  # noqa: F401  (registers the tables on Base)
         Base.metadata.create_all(self.engine)
+        add_missing_columns(self.engine)
 
     def session(self) -> Session:
         return self.SessionLocal()
 
     def dispose(self) -> None:
         self.engine.dispose()
+
+
+def add_missing_columns(engine: Engine) -> None:
+    """Older data folders lack columns added later (materials.grain,
+    job_parts.mirror/color, offcuts.name): add them with their server default
+    so old jobs keep working. Only adds, never drops or changes."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                default = col.server_default.arg if col.server_default is not None else None
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
+                if default is not None:
+                    ddl += f" DEFAULT '{default}'" if not str(default).isdigit() else f" DEFAULT {default}"
+                conn.execute(text(ddl))
 
 
 def _sqlite_pragmas(dbapi_conn, _record) -> None:

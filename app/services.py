@@ -16,7 +16,7 @@ import shutil
 import time
 import uuid
 import zipfile
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 
 from shapely import wkt as shapely_wkt
 from shapely.affinity import translate
@@ -29,8 +29,10 @@ from .models import Job, JobPart, Machine, Material, NestRun, Offcut, ReliefRun,
 
 VERSION = "0.1.0"
 MAX_UPLOAD = 20 * 1024 * 1024          # 20 MB per file
-MAX_TIME_LIMIT = 60.0
+MAX_TIME_LIMIT = 300.0
+MAX_SETS = 100
 DEFAULT_ROTATIONS = [0.0, 90.0, 180.0, 270.0]
+GRAIN_ROTATIONS = (0.0, 180.0)        # a material with grain may only turn half way
 DEFAULT_CUT_THROUGH = 0.3
 
 
@@ -113,13 +115,70 @@ def material_out(m: Material | None) -> dict | None:
     if m is None:
         return None
     return dict(id=m.id, name=m.name, thickness_mm=m.thickness_mm, sheet_w=m.sheet_w, sheet_h=m.sheet_h,
-                price_per_sheet=m.price_per_sheet, margin_mm=m.margin_mm)
+                price_per_sheet=m.price_per_sheet, margin_mm=m.margin_mm, grain=bool(m.grain))
 
 
 def offcut_out(o: Offcut) -> dict:
+    irregular, holes = False, 0
+    try:
+        g = shapely_wkt.loads(o.outline_wkt)
+        holes = len(getattr(g, "interiors", []))
+        irregular = holes > 0 or abs(g.envelope.area - g.area) > 0.001 * max(g.area, 1.0)
+    except Exception:
+        pass
     return dict(id=o.id, material_id=o.material_id, width=round(o.width, 2), height=round(o.height, 2),
                 outline_wkt=o.outline_wkt, source_job_id=o.source_job_id, created_at=iso(o.created_at),
-                used=bool(o.used))
+                used=bool(o.used), name=o.name or "", irregular=irregular, holes=holes)
+
+
+MIN_OFFCUT_MM = 20.0
+
+
+def _save_offcut(s: Session, material_id: int, outline, name: str) -> Offcut:
+    from shapely.geometry import Polygon
+
+    if s.get(Material, material_id) is None:
+        raise UserError("Material not found")
+    if not isinstance(outline, Polygon) or outline.is_empty or not outline.is_valid:
+        raise UserError("The remnant outline is not a valid closed shape")
+    b = outline.bounds
+    w, h = b[2] - b[0], b[3] - b[1]
+    if min(w, h) < MIN_OFFCUT_MM:
+        raise UserError(f"The remnant must be at least {MIN_OFFCUT_MM:g} mm on both sides")
+    if max(w, h) > 20000:
+        raise UserError("The remnant is larger than 20 m: check the drawing units")
+    outline = translate(outline, -b[0], -b[1])
+    o = Offcut(material_id=material_id, width=round(w, 2), height=round(h, 2), outline_wkt=outline.wkt,
+               source_job_id=None, used=False, name=(name or "")[:200])
+    s.add(o)
+    s.commit()
+    return o
+
+
+def create_offcut(s: Session, material_id: int, width: float, height: float, name: str = "") -> Offcut:
+    """A rectangular remnant typed in by size."""
+    from shapely.geometry import box
+
+    return _save_offcut(s, material_id, box(0, 0, float(width), float(height)), name)
+
+
+def upload_offcut(s: Session, material_id: int, upload) -> tuple[Offcut, list[str]]:
+    """A drawn remnant: the largest closed shape of an SVG/DXF is the outline;
+    holes in it are missing material. Other shapes are ignored (warned)."""
+    from core import importers
+
+    data = read_upload(upload)
+    name = os.path.basename(upload.filename or "remnant")
+    try:
+        rep = importers.import_file(data, name)
+    except (importers.ImportError_, ValueError) as e:
+        raise UserError(f"{name}: {e}") from e
+    parts = sorted(rep.parts, key=lambda p: -p.area)
+    warnings = list(rep.warnings)
+    if len(parts) > 1:
+        warnings.append(f"{len(parts) - 1} smaller shape(s) ignored: only the largest closed shape is the remnant")
+    o = _save_offcut(s, material_id, parts[0].shape, os.path.splitext(name)[0])
+    return o, warnings
 
 
 def cam_tool(t: Tool):
@@ -135,7 +194,7 @@ def part_from_row(r: JobPart) -> Part:
     shape = shapely_wkt.loads(r.shape_wkt)
     marks = [shapely_wkt.loads(m) for m in json.loads(r.marks_wkt or "[]")]
     return Part(id=r.part_id, name=r.name, shape=shape, qty=r.qty, marks=marks,
-                mark_layer=r.mark_layer, source=r.source)
+                mark_layer=r.mark_layer, source=r.source, mirror=bool(r.mirror), color=r.color or "")
 
 
 def part_rows(s: Session, job_id: int) -> list[JobPart]:
@@ -148,10 +207,16 @@ def job_parts(s: Session, job_id: int) -> list[Part]:
 
 
 def part_out(p: Part) -> dict:
+    from core.models import place
     from core.svgout import part_svg
+
+    shown = p
+    if p.mirror:        # the thumbnail shows the part as it will be cut
+        shown = replace(p, shape=place(p.shape, 0, p.width, 0, True), marks=[place(m, 0, p.width, 0, True) for m in p.marks])
     return dict(id=p.id, name=p.name, qty=p.qty, width=round(p.width, 2), height=round(p.height, 2),
                 area_mm2=round(p.area, 1), holes=len(p.shape.interiors), marks=len(p.marks),
-                mark_layer=p.mark_layer, source=p.source, svg=part_svg(p))
+                mark_layer=p.mark_layer, source=p.source, svg=part_svg(shown), mirror=bool(p.mirror),
+                color=p.color or "")
 
 
 def import_files(s: Session, job: Job, uploads: list) -> dict:
@@ -187,7 +252,8 @@ def import_files(s: Session, job: Job, uploads: list) -> dict:
                 p.source = name
             s.add(JobPart(job_id=job.id, part_id=p.id, position=pos, name=p.name, qty=p.qty,
                           shape_wkt=p.shape.wkt, marks_wkt=json.dumps([m.wkt for m in p.marks]),
-                          mark_layer=p.mark_layer or "engrave", source=p.source))
+                          mark_layer=p.mark_layer or "engrave", source=p.source, mirror=bool(p.mirror),
+                          color=(p.color or "")[:16]))
             pos += 1
             new_parts.append(p)
     s.commit()
@@ -218,7 +284,8 @@ def default_settings(s: Session, job: Job) -> dict:
     return dict(gap_mm=default_gap(s, mach), rotations=list(DEFAULT_ROTATIONS), allow_in_holes=True,
                 resolution_mm=2.0, time_limit_s=10.0, seed=1, use_offcuts=False,
                 margin_mm=mat.margin_mm if mat else 10.0,
-                sheet_w=mat.sheet_w if mat else None, sheet_h=mat.sheet_h if mat else None)
+                sheet_w=mat.sheet_w if mat else None, sheet_h=mat.sheet_h if mat else None,
+                sets=1, separate_colors=False, preset=None)
 
 
 # ---------- nest result <-> JSON ----------
@@ -230,7 +297,7 @@ def result_to_json(r: NestResult) -> dict:
                         utilisation=sh.utilisation, offcut=sh.offcut.wkt if sh.offcut is not None else None,
                         is_offcut=sh.is_offcut) for sh in r.sheets],
         "unplaced": dict(r.unplaced), "utilisation": r.utilisation, "elapsed_s": r.elapsed_s,
-        "attempts": r.attempts,
+        "attempts": r.attempts, "meta": dict(r.meta or {}),
     }
 
 
@@ -241,7 +308,8 @@ def result_from_json(d: dict) -> NestResult:
                           offcut=shapely_wkt.loads(x["offcut"]) if x.get("offcut") else None,
                           is_offcut=x.get("is_offcut", False)) for x in d["sheets"]]
     return NestResult(sheets=sheets, unplaced=dict(d.get("unplaced", {})), utilisation=d["utilisation"],
-                      elapsed_s=d.get("elapsed_s", 0.0), attempts=d.get("attempts", 1))
+                      elapsed_s=d.get("elapsed_s", 0.0), attempts=d.get("attempts", 1),
+                      meta=dict(d.get("meta") or {}))
 
 
 def latest_nest(s: Session, job_id: int) -> NestRun | None:
@@ -268,7 +336,7 @@ def _cut_estimate(parts: dict[str, Part], result: NestResult, tool: Tool | None,
     return length * passes / feed if feed > 0 else 0.0
 
 
-def build_nest_out(s: Session, job: Job, parts: list[Part], result: NestResult) -> dict:
+def build_nest_out(s: Session, job: Job, parts: list[Part], result: NestResult, meta: dict | None = None) -> dict:
     from core.svgout import sheet_svg
 
     pmap = {p.id: p for p in parts}
@@ -298,26 +366,39 @@ def build_nest_out(s: Session, job: Job, parts: list[Part], result: NestResult) 
         attempts=result.attempts, elapsed_s=round(result.elapsed_s, 2),
         cost=dict(sheets_thb=sheets_thb, machine_thb=machine_thb, total_thb=round(sheets_thb + machine_thb, 2),
                   cut_minutes=round(minutes, 1), vat_included=False),
+        meta={**(result.meta or {}), **(meta or {})},
     )
 
 
-def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
+def run_nest(s: Session, data_dir: str, job: Job, body, *, progress=None, should_stop=None) -> dict:
+    """Nest the job and store the result. progress(fraction, best) and
+    should_stop() go straight to nesting.engine.nest (for a background runner);
+    a cancelled run still stores and returns the best layout found."""
     from nesting import engine
 
     opts = default_settings(s, job)
     given = body.model_dump(exclude_none=True)
     opts.update(given)
     opts["time_limit_s"] = max(0.0, min(float(opts["time_limit_s"]), MAX_TIME_LIMIT))
+    opts["sets"] = max(1, min(int(opts.get("sets") or 1), MAX_SETS))
     if not all(math.isfinite(float(r)) for r in (opts["rotations"] or [])):
         raise UserError("Rotations must be numbers of degrees")   # JSON NaN/Infinity would crash the nester
     rots = [float(r) % 360.0 for r in (opts["rotations"] or [0.0])]
     opts["rotations"] = list(dict.fromkeys(rots))       # drop repeats, keep order
+    requested_rots = list(opts["rotations"])
+    # Grain (brushed, wood): turning a part 90 degrees turns its grain, so only 0/180.
+    mat = s.get(Material, job.material_id) if job.material_id else None
+    grain = bool(mat is not None and mat.grain)
+    if grain:
+        kept = [r for r in opts["rotations"] if any(abs(r - g) < 1e-9 for g in GRAIN_ROTATIONS)]
+        opts["rotations"] = kept or [0.0]
 
     if not opts.get("sheet_w") or not opts.get("sheet_h"):
         raise UserError("Choose a material or enter the sheet size")
     parts = job_parts(s, job.id)
     if not any(p.qty > 0 for p in parts):
         raise UserError("Add parts (quantity above 0) before nesting")
+    sets = opts["sets"]
 
     # A sheet bigger than the machine bed cannot be cut: nest on the part of
     # it that fits the bed (either way round) and keep the rest whole.
@@ -350,16 +431,21 @@ def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
 
     ns = NestSettings(gap_mm=float(opts["gap_mm"]), rotations=opts["rotations"],
                       allow_in_holes=bool(opts["allow_in_holes"]), resolution_mm=float(opts["resolution_mm"]),
-                      time_limit_s=opts["time_limit_s"], seed=int(opts["seed"]))
+                      time_limit_s=opts["time_limit_s"], seed=int(opts["seed"]),
+                      separate_colors=bool(opts.get("separate_colors")))
     t0 = time.perf_counter()
+    nest_parts = [replace(p, qty=p.qty * sets) for p in parts if p.qty > 0]
     try:
-        result = engine.nest([p for p in parts if p.qty > 0], sheets, ns)
+        result = engine.nest(nest_parts, sheets, ns, progress=progress, should_stop=should_stop)
     except ValueError as e:
         raise UserError(str(e)) from e
     if not result.elapsed_s:
         result.elapsed_s = time.perf_counter() - t0
 
-    out = build_nest_out(s, job, parts, result)
+    out = build_nest_out(s, job, nest_parts, result,
+                         meta=dict(rotations_requested=requested_rots, grain_locked=grain and
+                                   opts["rotations"] != requested_rots, time_limit_s=opts["time_limit_s"],
+                                   sets=sets, separate_colors=bool(opts.get("separate_colors"))))
     for old in s.scalars(select(NestRun).where(NestRun.job_id == job.id)):
         s.delete(old)
     s.add(NestRun(job_id=job.id, settings_json=json.dumps(opts),
@@ -412,8 +498,9 @@ def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
     for sh in result.sheets:
         for pl in sh.placements:
             nested[pl.part_id] = nested.get(pl.part_id, 0) + 1
+    sets = max(1, int(json.loads(run.settings_json).get("sets", 1) or 1))
     changed = [p.name for p in parts.values()
-               if nested.get(p.id, 0) + int(result.unplaced.get(p.id, 0)) != p.qty]
+               if nested.get(p.id, 0) + int(result.unplaced.get(p.id, 0)) != p.qty * sets]
     if changed:
         warnings.append(f"Parts or quantities changed after nesting ({', '.join(changed[:5])}"
                         f"{', ...' if len(changed) > 5 else ''}): these files use the old layout, nest again")
@@ -614,9 +701,10 @@ def job_detail(s: Session, job: Job) -> dict:
     return dict(id=job.id, name=job.name, material=material_out(mat), machine=machine_out(mach),
                 material_id=job.material_id, machine_id=job.machine_id, status=job.status,
                 created_at=iso(job.created_at), parts=[part_out(p) for p in job_parts(s, job.id)],
-                settings={k: settings[k] for k in ("gap_mm", "rotations", "allow_in_holes", "resolution_mm",
-                                                    "time_limit_s", "seed", "use_offcuts", "margin_mm",
-                                                    "sheet_w", "sheet_h")},
+                settings={k: settings.get(k) for k in ("gap_mm", "rotations", "allow_in_holes", "resolution_mm",
+                                                        "time_limit_s", "seed", "use_offcuts", "margin_mm",
+                                                        "sheet_w", "sheet_h", "sets", "separate_colors",
+                                                        "preset")},
                 nest=nest, exports=[file_out(job.id, r) for r in exports_of(job)])
 
 

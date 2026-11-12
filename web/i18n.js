@@ -64,6 +64,24 @@ const en = {
   relief_canvas_empty_title: 'No picture yet', relief_canvas_empty: 'Choose a picture to carve (PNG or JPG)',
   relief_regions_empty: 'Make the relief first; each colour of the picture then gets its own shape here.',
   relief_status_empty: 'Choose a picture, set the size, press Make relief', picture_and_size: 'Picture and size',
+  // production nest options (Part 2)
+  rot_none: 'none (as drawn)', rot_30: 'every 30°', rot_free: 'free (every 10°)',
+  q_thorough: 'Thorough (40 s)', q_custom: 'Custom time', resolution: 'Grid detail',
+  res_auto: 'auto (from quality)', res_small: 'small parts', search_s: 'Search time (s)', search_hint: '1 to {n} seconds',
+  err_search_s: 'Search time must be 1 to {n} seconds.', preset: 'Preset', preset_hint: 'Fills the fields below',
+  preset_custom: 'Custom', preset_letters: 'Letters / acrylic', preset_panels: 'Panels', preset_grain: 'Grain material',
+  preset_density: 'Max density', sets: 'Number of sets', sets_hint: 'Every quantity × sets', err_sets: 'Sets must be 1 to 100.',
+  separate_colors: 'Keep colours on separate sheets', grain_note: 'This material has grain: parts turn 0/180 only.',
+  meta_grain: 'Material has grain: rotations were limited to 0/180.',
+  meta_res: 'The sheet is big: grid detail {r} mm was used instead of {q} mm.',
+  meta_cancel: 'Stopped early: the best layout found so far is shown.',
+  meta_cancel_partial: 'Stopped before the first layout was finished: some parts are not placed.',
+  meta_sets: '{n} sets nested.', meta_colors: 'Each colour has its own sheets.',
+  mirror: 'Mirror', grain: 'Grain (0/180 only)', grain_hint: 'brushed, wood, directional film', grain_badge: 'grain',
+  offcut_add_title: 'Add a remnant', offcut_add_size: 'Add by size', offcut_err_size: 'Type the width and height.',
+  offcut_added: 'Remnant saved', offcut_drawing: 'Drawn remnant (SVG / DXF)', offcut_upload: 'Upload outline',
+  offcut_drawing_hint: 'Largest closed shape = remnant; holes in it = missing pieces', offcut_err_file: 'Choose an SVG or DXF file.',
+  offcut_drawn: 'drawn', offcut_holes_n: '{n} missing piece(s)', height_mm_plain: 'Height (mm)',
 };
 
 const th = {
@@ -121,6 +139,24 @@ const th = {
   relief_canvas_empty_title: 'ยังไม่มีรูป', relief_canvas_empty: 'เลือกรูปที่จะแกะนูน (PNG หรือ JPG)',
   relief_regions_empty: 'กดสร้างงานนูนก่อน แล้วแต่ละสีในรูปจะมีรูปทรงของตัวเองที่นี่',
   relief_status_empty: 'เลือกรูป ตั้งขนาด แล้วกดสร้างงานนูน', picture_and_size: 'รูปและขนาด',
+  // production nest options (Part 2)
+  rot_none: 'ไม่หมุน (ตามแบบ)', rot_30: 'ทุก 30°', rot_free: 'อิสระ (ทุก 10°)',
+  q_thorough: 'ละเอียดมาก (40 วินาที)', q_custom: 'กำหนดเวลาเอง', resolution: 'ความละเอียดตาราง',
+  res_auto: 'อัตโนมัติ (ตามคุณภาพ)', res_small: 'ชิ้นเล็ก', search_s: 'เวลาค้นหา (วินาที)', search_hint: '1 ถึง {n} วินาที',
+  err_search_s: 'เวลาค้นหาต้องอยู่ระหว่าง 1 ถึง {n} วินาที', preset: 'ชุดค่าสำเร็จ', preset_hint: 'กรอกค่าด้านล่างให้อัตโนมัติ',
+  preset_custom: 'กำหนดเอง', preset_letters: 'ตัวอักษร / อะคริลิก', preset_panels: 'แผ่นป้าย', preset_grain: 'วัสดุมีลาย',
+  preset_density: 'วางแน่นที่สุด', sets: 'จำนวนชุด', sets_hint: 'จำนวนทุกชิ้น × จำนวนชุด', err_sets: 'จำนวนชุดต้องอยู่ระหว่าง 1 ถึง 100',
+  separate_colors: 'แยกแผ่นตามสี', grain_note: 'วัสดุนี้มีลาย: หมุนชิ้นงานได้แค่ 0/180',
+  meta_grain: 'วัสดุมีลาย: จำกัดการหมุนไว้ที่ 0/180',
+  meta_res: 'แผ่นใหญ่: ใช้ความละเอียดตาราง {r} มม. แทน {q} มม.',
+  meta_cancel: 'หยุดก่อนกำหนด: แสดงแบบที่ดีที่สุดที่หาได้',
+  meta_cancel_partial: 'หยุดก่อนจัดวางแบบแรกเสร็จ: บางชิ้นยังไม่ได้วาง',
+  meta_sets: 'วางทั้งหมด {n} ชุด', meta_colors: 'แต่ละสีใช้แผ่นของตัวเอง',
+  mirror: 'กลับด้าน', grain: 'มีลาย (หมุนได้แค่ 0/180)', grain_hint: 'แฮร์ไลน์ ไม้ ฟิล์มมีทิศทาง', grain_badge: 'มีลาย',
+  offcut_add_title: 'เพิ่มเศษแผ่น', offcut_add_size: 'เพิ่มตามขนาด', offcut_err_size: 'กรุณากรอกความกว้างและความสูง',
+  offcut_added: 'บันทึกเศษแผ่นแล้ว', offcut_drawing: 'เศษแผ่นจากแบบวาด (SVG / DXF)', offcut_upload: 'อัปโหลดเส้นขอบ',
+  offcut_drawing_hint: 'รูปปิดที่ใหญ่ที่สุด = เศษแผ่น รูข้างในคือส่วนที่ขาดหายไป', offcut_err_file: 'กรุณาเลือกไฟล์ SVG หรือ DXF',
+  offcut_drawn: 'แบบวาด', offcut_holes_n: 'ขาดหาย {n} ส่วน', height_mm_plain: 'ความสูง (มม.)',
 };
 
 const DICTS = { en, th };
