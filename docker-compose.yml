@@ -1,0 +1,13 @@
+# Start:  docker compose up -d --build    then open http://localhost:8040
+# Backup: docker compose exec taddee python -m app.backup
+services:
+  taddee:
+    build: .
+    image: taddee:latest
+    container_name: taddee
+    restart: unless-stopped
+    ports:
+      - "${TADDEE_PORT:-8040}:8040"
+    volumes:
+      - ${TADDEE_DATA:-./data}:/data
+      - ${TADDEE_BACKUPS:-./backups}:/backups

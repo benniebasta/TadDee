@@ -1,0 +1,12 @@
+.git
+data
+backups
+node_modules
+e2e
+tests
+tests_js
+**/__pycache__
+.pytest_cache
+*.bundle
+Archive
+screens

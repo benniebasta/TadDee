@@ -93,3 +93,11 @@ artwork, run the rough file, change the bit, set Z0 again, run the finish.
 4. G-code: G21 G90 G17, M03 S, G0/G1 only, no M06, Windows line endings.
 
 Next: vector input (SVG/DXF), raster angle choice, nesting module, Ruida.
+
+## Docker
+    docker compose up -d --build     # then open http://localhost:8040
+Data stays in `./data`, backups in `./backups` (change with `TADDEE_DATA`,
+`TADDEE_BACKUPS`, `TADDEE_PORT` in a `.env` file). The container restarts by
+itself after a reboot once Docker Desktop starts. Backup now:
+`docker compose exec taddee python -m app.backup`. Update: `git pull`, then
+`docker compose up -d --build`.
