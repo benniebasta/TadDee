@@ -175,38 +175,48 @@ Ruida DXF (`cam/ruida.py`): ezdxf R2010, `$INSUNITS = 4` (mm). Layers: `CUT` col
 `ReliefParams` dataclass and `run_relief(image_path, out_dir, params, base=None) -> dict` (keys: width_mm, height_mm, depth_mm, lost_detail_mm, regions[], files[{name, tool, minutes, lines, deepest_z}], images[], total_minutes). Raises `ReliefError` with a user message. Region dicts: `index, color, area_mm2, profile, height_mm, round_mm, base_mm`. Takes a few seconds; call it in a worker thread (`run_in_threadpool`).
 
 ### 4.7 HTTP API (`app/`), all JSON unless noted, prefix `/api`
-Errors: `{"detail": "<plain sentence>"}` with 400 (bad input), 404, 409. Money in THB as numbers, VAT not included (label it in the UI).
+Errors: `{"detail": "<plain sentence>", "code": "<code>", "message": "<same sentence>", "request_id": "<id>"}` with 400 (bad input), 404, 409, 500. Codes: `bad_input`, `not_found`, `conflict`, `too_large`, `job_locked`, `task_busy`, `server_error`, `backup_failed`; the UI shows `err_<code>` from `i18n.js` in Thai. Every response has an `X-Request-ID` header (also in the log). Money in THB as numbers, VAT not included (label it in the UI).
 
 | Method + path | Body | Returns |
 |---|---|---|
-| GET `/health` | | `{"ok": true, "version": "0.1.0"}` |
+| GET `/health` | | `{ok, version, db_ok, disk_free_mb, uptime_s, last_backup, worker: {running, queued}}` |
 | GET/POST `/machines`, GET/PUT/DELETE `/machines/{id}` | `{name, kind: "cnc"\|"laser", bed_w, bed_h, rate_per_hour, notes}` | machine |
 | GET/POST `/tools`, PUT/DELETE `/tools/{id}` | CamTool fields minus id | tool |
 | GET/POST `/materials`, PUT/DELETE `/materials/{id}` | `{name, thickness_mm, sheet_w, sheet_h, price_per_sheet, margin_mm}` | material |
 | GET `/offcuts?material_id=` , DELETE `/offcuts/{id}` | | `[{id, material_id, width, height, outline_wkt, source_job_id, created_at, used}]` |
-| GET `/jobs` | | `[{id, name, material, machine, status, sheets, utilisation, created_at}]` newest first |
+| GET `/jobs?bin=` | | `[{id, name, material, machine, status, sheets, utilisation, created_at, deleted_at, purge_at}]` newest first; `bin=1` lists the bin |
 | POST `/jobs` | `{name, material_id, machine_id}` | job detail |
 | GET `/jobs/{id}` | | `{id, name, material, machine, status, parts: [PartOut], settings, nest: NestOut\|null, exports: [FileOut]}` |
 | PATCH `/jobs/{id}` | any of `{name, material_id, machine_id}` | job detail |
-| DELETE `/jobs/{id}` | | 204 |
+| DELETE `/jobs/{id}?purge=` | | 204: moves the job to the bin (30 days); `purge=1` on a job in the bin deletes it for good |
+| POST `/jobs/{id}/restore` | | job detail (out of the bin) |
+| POST `/jobs/{id}/duplicate` | | 201 job detail: new draft job, same material/machine/parts/nest settings, no nest or files |
+| POST `/jobs/{id}/unlock` | | job detail: undoes "Mark as cut" (its unused saved offcuts are removed, used ones freed); 409 if not cut |
 | POST `/jobs/{id}/files` | multipart `file` (one or more) | `{parts: [PartOut], warnings: []}` (appended to the job) |
 | PATCH `/jobs/{id}/parts/{part_id}` | `{qty?, name?, mark_layer?}` (qty 0..999) | PartOut |
 | DELETE `/jobs/{id}/parts/{part_id}` | | 204 |
-| POST `/jobs/{id}/nest` | `{gap_mm?, rotations?, allow_in_holes?, resolution_mm?, time_limit_s? (max 60), seed?, use_offcuts?, margin_mm?, sheet_w?, sheet_h?}` | NestOut |
+| POST `/jobs/{id}/nest?async=` | `{gap_mm?, rotations?, allow_in_holes?, resolution_mm?, time_limit_s? (max 60), seed?, use_offcuts?, margin_mm?, sheet_w?, sheet_h?}` | NestOut; `async=1`: 202 Task (bad input is still a 400 at once); 409 `task_busy` while this job is nesting |
 | POST `/jobs/{id}/export` | `{target: "ncstudio"\|"ruida", cut_tool_id?, mark_tool_id?, cam?: {CamSettings fields minus thickness}, kerf_mm?}` | `{files: [FileOut], warnings: []}` (replaces earlier exports of the same target) |
 | GET `/jobs/{id}/files/{name}` | | the file (download) |
 | GET `/jobs/{id}/export.zip` | | zip of all exports |
 | POST `/jobs/{id}/commit` | | marks job `cut`, saves sheet offcuts to `/offcuts`, marks used offcuts `used=true`; 409 if no nest |
-| POST `/relief` | multipart `image` + form fields of ReliefParams (styles as JSON string) | `ReliefOut {id, ...run_relief dict, image_urls, file_urls}` |
-| POST `/relief/{id}` | JSON ReliefParams fields (with `styles`) | ReliefOut (re-run on the stored image) |
+| POST `/relief?async=` | multipart `image` + form fields of ReliefParams (styles as JSON string) | `ReliefOut {id, ...run_relief dict, image_urls, file_urls}`; `async=1`: 202 Task with `ref` = relief id |
+| POST `/relief/{id}?async=` | JSON ReliefParams fields (with `styles`) | ReliefOut (re-run on the stored image); `async=1`: 202 Task |
+| GET `/tasks?job_id=&kind=&ref=&active=` | | `[Task]` newest first |
+| GET `/tasks/{id}` | | Task |
+| POST `/tasks/{id}/cancel` | | Task (queued: cancelled at once; running: stops at the next check, nothing is saved) |
+| GET `/admin/backup` | | `{time, path, size, folder}` of the last backup |
+| POST `/admin/backup` | | backup now (same as `python -m app.backup`) |
 | GET `/relief/{id}/files/{name}` | | file |
 
 `PartOut = {id, name, qty, width, height, area_mm2, holes, marks, mark_layer, source, svg}` (svg = `part_svg`).
 `NestOut = {sheets: [{index, sheet_id, width, height, is_offcut, utilisation, parts_count, svg, offcut: {width, height}|null}], unplaced: [{part_id, name, count}], utilisation, sheets_used, attempts, elapsed_s, cost: {sheets_thb, machine_thb, total_thb, cut_minutes, vat_included: false}}`. Cost: sheets_thb = full sheets used x material price (offcuts count 0); cut_minutes = sum of outside+inside perimeters x passes / cut tool feed (rough estimate before export); machine_thb = cut_minutes / 60 x machine rate.
 `FileOut = {name, url, size, minutes?, tool?}`.
+`Task = {id, task_id, kind: nest|relief, job_id, ref, status: queued|running|done|failed|cancelled, progress 0..1, message, result, created_at, started_at, finished_at}` (`result` of a nest: `{job_id, sheets_used, utilisation, unplaced, elapsed_s}`; of a relief: `{relief_id}`; of a failure: `{code, status}`).
+A job marked `cut` is locked: upload, part edits, nest, export and material/machine changes answer 409 `job_locked` until `/unlock`. Jobs in the bin answer 404 except restore and purge.
 Job `status`: `draft` (parts only) -> `nested` -> `exported` -> `cut`. Re-nesting clears exports.
 
-Storage (`app/models.py`, SQLAlchemy): tables `machines, tools, materials, jobs, job_parts (shape_wkt, marks_wkt, qty...), nest_runs (job_id, settings_json, result_json, created_at; keep latest per job), offcuts, relief_runs (id, image_path, params_json, result_json)`. Files under `<DATA_DIR>/jobs/<job_id>/` and `<DATA_DIR>/relief/<id>/`. File names safe: `<job>_<sheetNN>_<tool>.nc`, `<job>_<sheetNN>.dxf`; serve only names that exist in that folder (no path traversal: reject `/`, `\`, `..`). Upload limit 20 MB per file. Reload parts from WKT with `shapely.wkt.loads`.
+Storage (`app/models.py`, SQLAlchemy; schema changes only through Alembic migrations in `app/migrations/versions/NNNN_<what>.py`, applied at start, see `app/migrations/README.md`): tables `machines, tools, materials, jobs (+ settings_json, deleted_at), job_parts (shape_wkt, marks_wkt, qty...), nest_runs (job_id, settings_json, result_json, created_at; keep latest per job), offcuts, relief_runs (id, image_path, params_json, result_json), tasks (kind, job_id, ref, status, progress, message, params_json, result_json, created/started/finished)`. Files under `<DATA_DIR>/jobs/<job_id>/` and `<DATA_DIR>/relief/<id>/`. File names safe: `<job>_<sheetNN>_<tool>.nc`, `<job>_<sheetNN>.dxf`; serve only names that exist in that folder (no path traversal: reject `/`, `\`, `..`). Upload limit 20 MB per file. Reload parts from WKT with `shapely.wkt.loads`.
 
 Seed (`app/seed.py`, only when tables are empty): machines "Router (NC Studio)" cnc 2500x1300 rate 0; "Laser (Ruida)" laser 1300x900 rate 0. Tools: "6 mm flat 2-flute" 6 flat pass 3; "3 mm flat" 3 flat pass 2; "3 mm ball" 3 ball pass 1.5; "60° V-bit" 6 vbit angle 60 pass 1. Materials: "Acrylic 3 mm" 3 / 2440x1220, "ACP 3 mm" 3 / 2440x1220, "MDF 18 mm" 18 / 2440x1220, "PVC foam 5 mm" 5 / 2440x1220, margin 10, **price 0** (staff fill in real prices; the UI shows "set price" when 0; never invent prices).
 
@@ -224,7 +234,8 @@ Views and **required `data-testid`s** (the e2e test depends on them, do not rena
 3. **Relief** `#/relief`: image input (`relief-image`), width (`relief-width`), material thickness (`relief-material`), max height (`relief-height`), rough bit (`relief-rough`), finish bit (`relief-finish`), button **Make relief** (`relief-run`). Result: preview image (`relief-preview`), regions table (`relief-regions`; per row colour swatch, profile select, height, round inputs) with **Update** (`relief-update`) that re-runs with edited styles; file links (`relief-files`), total minutes.
 4. **Offcuts** `#/offcuts`: table by material (`offcuts-table`), delete buttons.
 5. **Settings** `#/settings`: three editable tables (machines, tools, materials) with add/edit/delete (`settings-tools` table, `tool-add` button, form fields `tool-name`, `tool-diameter`, `tool-kind`, `tool-save`; same pattern for machines `machine-*` and materials `material-*` incl. `material-price`).
-- Errors from the API show in a toast (`toast`), never `alert()`. Loading states disable buttons.
+6. **Platform additions** (Part 2, 3.1/3.4/3.5/3.6): Nest and Relief run as background tasks with a progress bar and Cancel in the panel (`nest-progress`, `nest-cancel`, `relief-progress`, `relief-cancel`; `web/task.js`) and pick a running task up again after a reload. Job page: `job-duplicate`, lock banner `job-locked` with `job-unlock` (confirm). Jobs page: filter `jobs-filter-active` / `jobs-filter-bin`, bin table `bin-table`, rows `bin-row`, `job-restore`, `job-purge`. Settings: `system-panel`, `health-info`, `backup-last`, `backup-now`.
+- Errors from the API show in a toast (`toast`), never `alert()`; in Thai the toast shows `err_<code>` (plus the detail for input errors). Loading states disable buttons.
 - `api.js` wraps fetch: JSON in/out, throws `Error(detail)`.
 
 ### 4.9 Safety guards (added in integration review)
@@ -260,7 +271,7 @@ Views and **required `data-testid`s** (the e2e test depends on them, do not rena
 ## 7. Safety and ops
 - Every G-code file starts at safe Z, has spindle on before cutting, ends with spindle off and M30. Z never goes below -(thickness + cut_through) for CAM, nor below the relief depth for relief.
 - First real use: dry run (air cut) with Z0 set 20 mm above the material.
-- Data folder is plain files + SQLite; back it up by copying `data/`.
+- Data folder is plain files + SQLite; back it up with `python -m app.backup` / `backup.bat` (daily 23:30 via Task Scheduler, README), never by copying `nest.db` while the app runs.
 - No secrets in the code. The app has no login in v1; keep it on the office network/Tailscale only.
 
 ## 8. Build order
@@ -306,12 +317,12 @@ Order matters: P1 before anything else (real machines decide the rest). P2 and P
 ## P3. Make it reliable
 | # | Work | Done when |
 |---|---|---|
-| 3.1 | Job queue: nesting and relief run in a worker, survive a browser close, one at a time per machine, progress shown | Close the tab mid-nest, reopen, result is there |
-| 3.2 | Database migrations (Alembic) and a schema version check at start | Upgrade keeps old jobs |
+| 3.1 | Job queue: nesting and relief run in a worker, survive a browser close, one at a time per machine, progress shown | Close the tab mid-nest, reopen, result is there. **Built** (`app/tasks.py`; one at a time per kind, not yet per machine) |
+| 3.2 | Database migrations (Alembic) and a schema version check at start | Upgrade keeps old jobs. **Built** (`app/migrate.py`, `app/migrations/`) |
 | 3.3 | Export revisions: every export gets a number, old files kept, the file header carries job, sheet, revision, bit, material, date | Operator can prove which file was cut |
-| 3.4 | Daily backup of the database and job files to `D:\Site backups\nest` (keep 14), plus a restore test | Restore on a clean folder passes |
-| 3.5 | Logging to file with rotation, a health page, clear error messages in EN/TH, upload limits, clean-up of files older than 90 days (never offcuts or cut jobs) | No silent failures |
-| 3.6 | Duplicate job, undo delete (30-day bin), lock a job after "Mark as cut" | No lost work by a wrong tap |
+| 3.4 | Daily backup of the database and job files to `D:\Site backups\nest` (keep 14), plus a restore test | Restore on a clean folder passes. **Built** (`app/backup.py`, `backup.bat`); Task Scheduler entry still to be made on TANINP |
+| 3.5 | Logging to file with rotation, a health page, clear error messages in EN/TH, upload limits, clean-up of files older than 90 days (never offcuts or cut jobs) | No silent failures. **Built** (`app/logs.py`, `app/maintenance.py`, `/api/health`, Settings > System) |
+| 3.6 | Duplicate job, undo delete (30-day bin), lock a job after "Mark as cut" | No lost work by a wrong tap. **Built** |
 
 ## P4. Access and safety
 | # | Work | Notes |

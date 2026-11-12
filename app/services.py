@@ -14,10 +14,12 @@ import os
 import re
 import shutil
 import time
+import inspect
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import asdict, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from shapely import wkt as shapely_wkt
 from shapely.affinity import translate
@@ -26,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from core.models import NestResult, NestSettings, Part, Placement, SheetResult, SheetSpec
 
-from .models import FeedOverride, Job, JobPart, Machine, Material, NestRun, Offcut, ReliefRun, Tool
+from .models import FeedOverride, Job, JobPart, Machine, Material, NestRun, Offcut, ReliefRun, Task, Tool, now_utc
 
 VERSION = "0.1.0"
 MAX_UPLOAD = 20 * 1024 * 1024          # 20 MB per file
@@ -35,18 +37,37 @@ DEFAULT_ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 DEFAULT_CUT_THROUGH = 0.3
 
 
-class UserError(Exception):
-    """Something the user can fix. Becomes an HTTP error with this sentence."""
+BIN_DAYS = 30                          # a deleted job stays in the bin this long
 
-    def __init__(self, message: str, status: int = 400, extra: dict | None = None):
+# error code per HTTP status, when the raiser gives none (the UI translates codes)
+STATUS_CODES = {400: "bad_input", 404: "not_found", 409: "conflict", 413: "too_large", 422: "bad_input"}
+
+
+class UserError(Exception):
+    """Something the user can fix. Becomes an HTTP error with this sentence,
+    a short machine code (`job_locked`, `not_found`, ...) and optional extra JSON keys."""
+
+    def __init__(self, message: str, status: int = 400, code: str | None = None, extra: dict | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
         self.extra = extra or {}     # more keys for the JSON body (e.g. "issues")
+        self.code = code or STATUS_CODES.get(status, "error")
+
+
+class TaskCancelled(Exception):
+    """Raised inside a background task when Cancel was pressed."""
 
 
 def not_found(what: str) -> UserError:
     return UserError(f"{what} not found", 404)
+
+
+def ensure_unlocked(job: Job) -> None:
+    """Jobs marked as cut are locked: no part edits, nest or export changes."""
+    if job.status == "cut":
+        raise UserError("This job is marked as cut and locked. Unlock it first to change it.", 409,
+                        "job_locked")
 
 
 # ---------- small helpers ----------
@@ -82,7 +103,7 @@ def safe_file(folder: str, name: str) -> str:
 def read_upload(upload) -> bytes:
     data = upload.file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
-        raise UserError(f"{upload.filename or 'File'} is larger than 20 MB")
+        raise UserError(f"{upload.filename or 'File'} is larger than 20 MB", 400, "too_large")
     return data
 
 
@@ -329,9 +350,62 @@ def build_nest_out(s: Session, job: Job, parts: list[Part], result: NestResult) 
     )
 
 
-def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
+def call_nest(fn: Callable, parts, sheets, settings, progress: Callable | None = None,
+              should_stop: Callable | None = None):
+    """The one place the app calls the nesting engine. `progress(p, summary)`
+    and `should_stop()` are passed only when the engine's signature accepts
+    them, so this works with engines that have neither, either or both."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    any_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    kw = {}
+    if progress is not None and (any_kw or "progress" in params):
+        kw["progress"] = progress
+    if should_stop is not None and (any_kw or "should_stop" in params):
+        kw["should_stop"] = should_stop
+    return fn(parts, sheets, settings, **kw)
+
+
+def run_nest(s: Session, data_dir: str, job: Job, body, progress: Callable | None = None,
+             should_stop: Callable | None = None) -> dict:
+    """Nest the job and save the result. With `should_stop` (background task),
+    a cancelled run saves nothing and raises TaskCancelled."""
     from nesting import engine
 
+    ensure_unlocked(job)
+    opts, parts, sheets, ns = prepare_nest(s, job, body)
+    t0 = time.perf_counter()
+    try:
+        result = call_nest(engine.nest, [p for p in parts if p.qty > 0], sheets, ns,
+                           progress=progress, should_stop=should_stop)
+    except ValueError as e:
+        raise UserError(str(e)) from e
+    if should_stop is not None and should_stop():
+        raise TaskCancelled()
+    if not result.elapsed_s:
+        result.elapsed_s = time.perf_counter() - t0
+
+    s.refresh(job)                                       # it may have changed while nesting
+    if job.deleted_at is not None:
+        raise not_found("Job")
+    ensure_unlocked(job)
+    out = build_nest_out(s, job, parts, result)
+    for old in s.scalars(select(NestRun).where(NestRun.job_id == job.id)):
+        s.delete(old)
+    s.add(NestRun(job_id=job.id, settings_json=json.dumps(opts),
+                  result_json=json.dumps({"result": result_to_json(result), "out": out})))
+    job.settings_json = json.dumps(opts)
+    clear_exports(data_dir, job)                         # re-nesting makes old files wrong
+    job.status = "nested"
+    s.commit()
+    return out
+
+
+def prepare_nest(s: Session, job: Job, body):
+    """Check the nest request and build the engine input:
+    (opts, parts, sheets, NestSettings). Raises UserError on bad input."""
     opts = default_settings(s, job)
     given = body.model_dump(exclude_none=True)
     opts.update(given)
@@ -379,23 +453,7 @@ def run_nest(s: Session, data_dir: str, job: Job, body) -> dict:
     ns = NestSettings(gap_mm=float(opts["gap_mm"]), rotations=opts["rotations"],
                       allow_in_holes=bool(opts["allow_in_holes"]), resolution_mm=float(opts["resolution_mm"]),
                       time_limit_s=opts["time_limit_s"], seed=int(opts["seed"]))
-    t0 = time.perf_counter()
-    try:
-        result = engine.nest([p for p in parts if p.qty > 0], sheets, ns)
-    except ValueError as e:
-        raise UserError(str(e)) from e
-    if not result.elapsed_s:
-        result.elapsed_s = time.perf_counter() - t0
-
-    out = build_nest_out(s, job, parts, result)
-    for old in s.scalars(select(NestRun).where(NestRun.job_id == job.id)):
-        s.delete(old)
-    s.add(NestRun(job_id=job.id, settings_json=json.dumps(opts),
-                  result_json=json.dumps({"result": result_to_json(result), "out": out})))
-    clear_exports(data_dir, job)                         # re-nesting makes old files wrong
-    job.status = "nested"
-    s.commit()
-    return out
+    return opts, parts, sheets, ns
 
 
 # ---------- exports ----------
@@ -580,6 +638,11 @@ def run_checks(s: Session, job: Job, q) -> dict:
 def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
     from cam.checks import summary
 
+    ensure_unlocked(job)
+    if active_task(s, "nest", job.id) is not None:
+        raise UserError("This job is being nested: wait for the nest to finish, then make the files", 409,
+                        "task_busy")
+
     cam_opts = body.cam.model_dump(exclude_none=True) if body.cam else {}
     c = _context(s, job, body.target, cut_tool_id=body.cut_tool_id, mark_tool_id=body.mark_tool_id,
                  cam_opts=cam_opts, kerf_mm=body.kerf_mm)
@@ -604,7 +667,7 @@ def run_export(s: Session, data_dir: str, job: Job, body) -> dict:
     issues = _issues(c)
     blocks = [i for i in issues if i["severity"] == "block"]
     if blocks or (issues and not body.accept_warnings):
-        raise UserError(summary(issues), 422, {"issues": issues})
+        raise UserError(summary(issues), 422, extra={"issues": issues})
 
     rev = next_revision(data_dir, job)
     sub = rev_dirname(rev)
@@ -772,7 +835,8 @@ def job_list_item(s: Session, job: Job, mats: dict, machs: dict) -> dict:
     m, mc = mats.get(job.material_id), machs.get(job.machine_id)
     return dict(id=job.id, name=job.name, material=m.name if m else None, machine=mc.name if mc else None,
                 material_id=job.material_id, machine_id=job.machine_id, status=job.status, sheets=sheets,
-                utilisation=util, created_at=iso(job.created_at))
+                utilisation=util, created_at=iso(job.created_at), deleted_at=iso(job.deleted_at) or None,
+                purge_at=iso(job.deleted_at + timedelta(days=BIN_DAYS)) if job.deleted_at else None)
 
 
 def job_detail(s: Session, job: Job) -> dict:
@@ -781,6 +845,8 @@ def job_detail(s: Session, job: Job) -> dict:
     run = latest_nest(s, job.id)
     settings = default_settings(s, job)
     nest = None
+    if job.settings_json:
+        settings.update(json.loads(job.settings_json))
     if run is not None:
         settings.update(json.loads(run.settings_json))
         nest = json.loads(run.result_json)["out"]
@@ -790,16 +856,96 @@ def job_detail(s: Session, job: Job) -> dict:
                 settings={k: settings[k] for k in ("gap_mm", "rotations", "allow_in_holes", "resolution_mm",
                                                     "time_limit_s", "seed", "use_offcuts", "margin_mm",
                                                     "sheet_w", "sheet_h")},
+                settings_saved=bool(job.settings_json) or run is not None,
+                locked=job.status == "cut", deleted_at=iso(job.deleted_at) or None,
                 nest=nest, exports=files_out(job))
 
 
 def delete_job(s: Session, data_dir: str, job: Job) -> None:
+    """Move the job to the bin (soft delete). purge_job removes it for good."""
+    if job.deleted_at is None:
+        job.deleted_at = now_utc()
+        for t in s.scalars(select(Task).where(Task.job_id == job.id, Task.status == "queued")):
+            t.status, t.message, t.finished_at = "cancelled", "Job deleted", now_utc()
+        s.commit()
+
+
+def restore_job(s: Session, job: Job) -> None:
+    job.deleted_at = None
+    s.commit()
+
+
+def purge_job(s: Session, data_dir: str, job: Job) -> None:
+    """Delete the job, its parts, nest and files for good."""
     for model in (JobPart, NestRun):
         for row in s.scalars(select(model).where(model.job_id == job.id)):
             s.delete(row)
     s.delete(job)
     s.commit()
     shutil.rmtree(job_dir(data_dir, job.id), ignore_errors=True)
+
+
+def duplicate_job(s: Session, job: Job) -> Job:
+    """New draft job with the same material, machine, parts and nest settings.
+    The nest result and the files are not copied."""
+    settings = job.settings_json
+    run = latest_nest(s, job.id)
+    if run is not None:
+        settings = run.settings_json
+    copy = Job(name=(f"{job.name} (copy)")[:200], material_id=job.material_id, machine_id=job.machine_id,
+               status="draft", exports_json="[]", settings_json=settings)
+    s.add(copy)
+    s.flush()
+    for r in part_rows(s, job.id):
+        s.add(JobPart(job_id=copy.id, part_id=r.part_id, position=r.position, name=r.name, qty=r.qty,
+                      shape_wkt=r.shape_wkt, marks_wkt=r.marks_wkt, mark_layer=r.mark_layer, source=r.source))
+    s.commit()
+    return copy
+
+
+def unlock_job(s: Session, job: Job) -> None:
+    """Undo "Mark as cut": the job can be changed again. The offcuts it saved
+    (still unused) leave the library and the offcuts it used come back,
+    so marking it as cut again does not count them twice."""
+    if job.status != "cut":
+        raise UserError("This job is not locked", 409)
+    for o in s.scalars(select(Offcut).where(Offcut.source_job_id == job.id, Offcut.used.is_(False))):
+        s.delete(o)
+    run = latest_nest(s, job.id)
+    if run is not None:
+        for sh in json.loads(run.result_json)["result"]["sheets"]:
+            sid = str(sh.get("sheet_id", ""))
+            if sh.get("is_offcut") and sid.startswith("offcut-") and sh.get("placements"):
+                try:
+                    o = s.get(Offcut, int(sid.split("-", 1)[1]))
+                except ValueError:
+                    continue
+                if o is not None:
+                    o.used = False
+    job.status = "exported" if exports_of(job) else ("nested" if run is not None else "draft")
+    s.commit()
+
+
+# ---------- background tasks ----------
+
+ACTIVE = ("queued", "running")
+
+
+def active_task(s: Session, kind: str, job_id: int | None = None, ref: str | None = None) -> Task | None:
+    q = select(Task).where(Task.kind == kind, Task.status.in_(ACTIVE))
+    if job_id is not None:
+        q = q.where(Task.job_id == job_id)
+    if ref is not None:
+        q = q.where(Task.ref == ref)
+    return s.scalars(q.order_by(Task.id)).first()
+
+
+def task_out(t: Task) -> dict:
+    return dict(id=t.id, task_id=t.id, kind=t.kind, job_id=t.job_id, ref=t.ref, status=t.status,
+                progress=round(float(t.progress or 0.0), 4), message=t.message or "",
+                result=json.loads(t.result_json) if t.result_json else None,
+                created_at=iso(t.created_at), started_at=iso(t.started_at) or None,
+                finished_at=iso(t.finished_at) or None)
 
 
 # ---------- relief ----------
@@ -844,6 +990,20 @@ def params_base(run: ReliefRun) -> str:
 
 
 def create_relief(s: Session, data_dir: str, upload, params: dict) -> dict:
+    run = store_relief_upload(data_dir, upload, params)
+    try:
+        res = _run_relief(run, params, data_dir)
+    except UserError:
+        shutil.rmtree(relief_dir(data_dir, run.id), ignore_errors=True)
+        raise
+    run.result_json = json.dumps(res)
+    s.add(run)
+    s.commit()
+    return _relief_out(run)
+
+
+def store_relief_upload(data_dir: str, upload, params: dict) -> ReliefRun:
+    """Save the uploaded picture in a new relief folder; the run is not added to the session."""
     data = read_upload(upload)
     if not data:
         raise UserError("Choose a picture")
@@ -856,16 +1016,7 @@ def create_relief(s: Session, data_dir: str, upload, params: dict) -> dict:
     img = os.path.join(folder, f"source_{slug(stem, 'image')}{ext}")
     with open(img, "wb") as fh:
         fh.write(data)
-    run = ReliefRun(id=rid, image_path=img, params_json=json.dumps(params))
-    try:
-        res = _run_relief(run, params, data_dir)
-    except UserError:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise
-    run.result_json = json.dumps(res)
-    s.add(run)
-    s.commit()
-    return _relief_out(run)
+    return ReliefRun(id=rid, image_path=img, params_json=json.dumps(params), result_json="{}")
 
 
 def rerun_relief(s: Session, data_dir: str, run: ReliefRun, changes: dict) -> dict:

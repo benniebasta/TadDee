@@ -7,8 +7,49 @@ library, cost estimate, and 3D relief from a picture. Full spec: PLAN.md.
 ## Start
     pip install -r requirements.txt
     python -m app            # then open http://localhost:8040  (Windows: run.bat)
-Tests: `python -m pytest -q` (108 unit/API tests). Browser test: start the
+Tests: `python -m pytest -q` (127 unit/API tests). Browser test: start the
 app on an empty data folder, then `node e2e/e2e.mjs`.
+
+## Running it in the shop
+- **Data folder** (`NEST_DATA_DIR`, default `./data`): `nest.db`, `jobs/<id>/`
+  (exported files), `relief/<id>/`, `logs/nest.log`.
+- **Background work:** nesting and relief run in a worker inside the app,
+  one at a time per kind. The page shows progress and Cancel and picks the
+  task up again after a reload or from another device. API: add `?async=1`
+  to `POST /api/jobs/{id}/nest`, `POST /api/relief`, `POST /api/relief/{id}`;
+  then `GET /api/tasks/{task_id}`, `POST /api/tasks/{task_id}/cancel`.
+- **Database upgrades** run by themselves at start (Alembic). How to add a
+  migration: `app/migrations/README.md`.
+- **Logs:** `data/logs/nest.log`, 5 files of 5 MB. Every line of a request
+  carries its request id; the same id is in the `X-Request-ID` header and in
+  error replies, so an error on screen can be found in the log.
+- **Health:** `GET /api/health` (database, free disk, version, uptime, last
+  backup, tasks waiting); also on the Settings page.
+- **Clean-up:** at start and every 24 h, exported files older than 90 days
+  are deleted (never for jobs marked as cut), old relief runs too; jobs in
+  the bin are deleted for good after 30 days. Offcuts are never touched.
+- **Jobs:** Delete moves a job to the Bin (Jobs page, "Bin") for 30 days,
+  with Restore. Duplicate copies parts and nest settings, not results.
+  "Mark as cut" locks the job (no part, nest or export changes) until
+  "Unlock", which also takes its saved offcuts back out of the library.
+
+## Backup
+    python -m app.backup                 # Windows: backup.bat
+Makes `nest-YYYYMMDD-HHMMSS-mmm.zip` (a consistent copy of the database plus
+all job and relief files) in `NEST_BACKUP_DIR` (default `D:\Site backups\nest`
+on Windows, `./backups` elsewhere) and keeps the newest 14. Settings has a
+"Back up now" button and shows the last backup time.
+
+Every night at 23:30 (run once in a Command Prompt as the user that runs Nest,
+with the real install folder):
+
+    schtasks /Create /F /SC DAILY /ST 23:30 /TN "Nest backup" /TR "\"C:\nest\backup.bat\""
+
+Restore (only into an empty or new folder, then start Nest on it):
+
+    python -m app.backup --restore "D:\Site backups\nest\nest-20261112-233000-000.zip" --to C:\nest\data-restored
+    set NEST_DATA_DIR=C:\nest\data-restored
+    run.bat
 
 # 3D relief module
 

@@ -68,7 +68,9 @@ FAST = {"resolution_mm": 3, "time_limit_s": 0, "seed": 1}
 def test_health(client):
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "version": "0.1.0"}
+    h = r.json()
+    assert h["ok"] is True and h["version"] == "0.1.0" and h["db_ok"] is True
+    assert {"disk_free_mb", "uptime_s", "last_backup", "worker"} <= set(h)
 
 
 def test_seed_present(client):

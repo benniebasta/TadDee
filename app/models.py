@@ -74,6 +74,10 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|nested|exported|cut
     exports_json: Mapped[str] = mapped_column(Text, default="[]")     # list of file records
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
+    # last nest settings, kept apart from the result so a duplicate can copy them (migration 0002)
+    settings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # set = in the bin (soft delete); purged 30 days later (migration 0002)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class JobPart(Base):
@@ -118,3 +122,21 @@ class ReliefRun(Base):
     params_json: Mapped[str] = mapped_column(Text)
     result_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
+
+
+class Task(Base):
+    """Background work (nest or relief) run by app/tasks.py, one at a time per kind."""
+    __tablename__ = "tasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)          # nest | relief
+    job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    ref: Mapped[str | None] = mapped_column(String(32), nullable=True)  # relief run id
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    # queued | running | done | failed | cancelled
+    progress: Mapped[float] = mapped_column(Float, default=0.0)        # 0..1
+    message: Mapped[str] = mapped_column(Text, default="")
+    params_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

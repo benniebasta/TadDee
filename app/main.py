@@ -7,25 +7,37 @@ NEST_DATA_DIR, so importing this module does not touch ./data.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
+import time
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from . import backup as backup_mod
 from . import services as sv
 from .db import Database, default_data_dir, get_database, session_scope
-from .models import FeedOverride, Job, JobPart, Machine, Material, Offcut, ReliefRun, Tool
-from .schemas import (ChecksOut, ChecksQuery, CommitOut, ExportIn, ExportOut, FeedIn, FeedOut, FeedUpdate,
-                      JobCreate, JobDetail, JobListItem, JobUpdate,
+from .logs import new_request_id, request_id, setup_logging
+from .models import FeedOverride, Job, JobPart, Machine, Material, Offcut, ReliefRun, Task, Tool
+from .schemas import (BackupOut, ChecksOut, ChecksQuery, CommitOut, ExportIn, ExportOut, FeedIn, FeedOut,
+                      FeedUpdate, JobCreate, JobDetail, JobListItem, JobUpdate,
                       MachineIn, MachineOut, MachineUpdate, MaterialIn, MaterialOut, MaterialUpdate, NestIn,
-                      NestOut, OffcutOut, PartOut, PartUpdate, ReliefIn, ReliefOut, ToolIn, ToolOut, ToolUpdate,
-                      UploadOut)
+                      NestOut, OffcutOut, PartOut, PartUpdate, ReliefIn, ReliefOut, TaskOut, ToolIn, ToolOut,
+                      ToolUpdate, UploadOut)
 from .seed import seed
+from .tasks import Worker
+
+log = logging.getLogger("nest")
+Async = Annotated[bool, Query(alias="async", description="1 = run in the background, return {task_id}")]
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -60,14 +72,58 @@ def _apply(row, changes: dict) -> None:
         setattr(row, k, v)
 
 
+def _job(s: Session, jid: int, binned: bool = False) -> Job:
+    """The job, 404 when missing. Jobs in the bin are only found with binned=True."""
+    j = s.get(Job, jid)
+    if j is None or (j.deleted_at is not None and not binned):
+        raise sv.not_found("Job")
+    return j
+
+
+def _open_job(s: Session, jid: int) -> Job:
+    """A job that may be changed (not in the bin, not locked)."""
+    j = _job(s, jid)
+    sv.ensure_unlocked(j)
+    return j
+
+
+def _worker(request: Request) -> Worker:
+    return request.app.state.worker
+
+
+def _task_response(s: Session, t: Task, status: int = 202) -> JSONResponse:
+    s.expire_all()
+    t = s.get(Task, t.id)
+    return JSONResponse(sv.task_out(t), status_code=status)
+
+
 # ---------- routes ----------
 
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api")
 
     @r.get("/health")
-    def health():
-        return {"ok": True, "version": sv.VERSION}
+    def health(request: Request):
+        db: Database = request.app.state.db
+        db_ok, queued = True, 0
+        try:
+            with db.session() as s:
+                s.execute(text("SELECT 1"))
+                queued = s.scalar(select(func.count()).select_from(Task).where(Task.status == "queued")) or 0
+        except Exception:  # noqa: BLE001
+            log.exception("health: database check failed")
+            db_ok = False
+        try:
+            free = shutil.disk_usage(db.data_dir).free
+        except OSError:
+            free = None
+        last = backup_mod.last_backup(db.data_dir)
+        w = request.app.state.worker
+        return {"ok": db_ok, "version": sv.VERSION, "db_ok": db_ok,
+                "disk_free_mb": round(free / 1e6) if free is not None else None,
+                "uptime_s": round(time.time() - request.app.state.started_at, 1),
+                "last_backup": last.get("time") if last else None,
+                "worker": {"running": bool(w.started), "queued": int(queued)}}
 
     # --- machines ---
     @r.get("/machines", response_model=list[MachineOut])
@@ -236,10 +292,11 @@ def build_router() -> APIRouter:
             raise sv.UserError("Machine not found")
 
     @r.get("/jobs", response_model=list[JobListItem])
-    def list_jobs(s: S):
+    def list_jobs(s: S, bin: bool = False):  # noqa: A002  (?bin=1 lists the bin)
         mats = {m.id: m for m in s.scalars(select(Material))}
         machs = {m.id: m for m in s.scalars(select(Machine))}
-        jobs = s.scalars(select(Job).order_by(Job.created_at.desc(), Job.id.desc()))
+        q = select(Job).where(Job.deleted_at.is_not(None) if bin else Job.deleted_at.is_(None))
+        jobs = s.scalars(q.order_by(Job.deleted_at.desc() if bin else Job.created_at.desc(), Job.id.desc()))
         return [sv.job_list_item(s, j, mats, machs) for j in jobs]
 
     @r.post("/jobs", response_model=JobDetail, status_code=201)
@@ -253,30 +310,57 @@ def build_router() -> APIRouter:
 
     @r.get("/jobs/{jid}", response_model=JobDetail)
     def get_job(jid: int, s: S):
-        return sv.job_detail(s, _get(s, Job, jid, "Job"))
+        return sv.job_detail(s, _job(s, jid))
 
     @r.patch("/jobs/{jid}", response_model=JobDetail)
     def update_job(jid: int, body: JobUpdate, s: S):
-        j = _get(s, Job, jid, "Job")
+        j = _job(s, jid)
         changes = body.model_dump(exclude_unset=True)
         if changes.get("name") is None:
             changes.pop("name", None)
+        if any(changes.get(k, getattr(j, k)) != getattr(j, k) for k in ("material_id", "machine_id")):
+            sv.ensure_unlocked(j)              # the name of a cut job may change, nothing else
         _check_links(s, changes.get("material_id"), changes.get("machine_id"))
         _apply(j, changes)
         s.commit()
         return sv.job_detail(s, j)
 
     @r.delete("/jobs/{jid}", status_code=204)
-    def delete_job(jid: int, s: S, d: D):
-        sv.delete_job(s, d, _get(s, Job, jid, "Job"))
+    def delete_job(jid: int, s: S, d: D, purge: bool = False):
+        """Moves the job to the bin; ?purge=1 on a job in the bin deletes it for good."""
+        j = _job(s, jid, binned=True)
+        if purge:
+            if j.deleted_at is None:
+                raise sv.UserError("Move the job to the bin before deleting it for good", 409)
+            sv.purge_job(s, d, j)
+        elif j.deleted_at is not None:
+            raise sv.not_found("Job")
+        else:
+            sv.delete_job(s, d, j)
         return Response(status_code=204)
+
+    @r.post("/jobs/{jid}/restore", response_model=JobDetail)
+    def restore_job(jid: int, s: S):
+        j = _job(s, jid, binned=True)
+        sv.restore_job(s, j)
+        return sv.job_detail(s, j)
+
+    @r.post("/jobs/{jid}/duplicate", response_model=JobDetail, status_code=201)
+    def duplicate_job(jid: int, s: S):
+        return sv.job_detail(s, sv.duplicate_job(s, _job(s, jid)))
+
+    @r.post("/jobs/{jid}/unlock", response_model=JobDetail)
+    def unlock_job(jid: int, s: S):
+        j = _job(s, jid)
+        sv.unlock_job(s, j)
+        return sv.job_detail(s, j)
 
     @r.post("/jobs/{jid}/files", response_model=UploadOut)
     def upload_files(jid: int, s: S, file: list[UploadFile] = File(...)):
-        return sv.import_files(s, _get(s, Job, jid, "Job"), file)
+        return sv.import_files(s, _open_job(s, jid), file)
 
     def _part_row(s: Session, jid: int, pid: str) -> JobPart:
-        _get(s, Job, jid, "Job")
+        _open_job(s, jid)
         row = s.scalars(select(JobPart).where(JobPart.job_id == jid, JobPart.part_id == pid)).first()
         if row is None:
             raise sv.not_found("Part")
@@ -295,21 +379,31 @@ def build_router() -> APIRouter:
         s.commit()
         return Response(status_code=204)
 
-    @r.post("/jobs/{jid}/nest", response_model=NestOut)
-    def nest_job(jid: int, s: S, d: D, body: NestIn | None = None):
-        return sv.run_nest(s, d, _get(s, Job, jid, "Job"), body or NestIn())
+    @r.post("/jobs/{jid}/nest", response_model=NestOut,
+            responses={202: {"model": TaskOut, "description": "?async=1: the queued task"}})
+    def nest_job(jid: int, request: Request, s: S, d: D, body: NestIn | None = None, run_async: Async = False):
+        j = _open_job(s, jid)
+        body = body or NestIn()
+        busy = sv.active_task(s, "nest", jid)
+        if busy is not None:
+            raise sv.UserError("This job is already being nested", 409, "task_busy")
+        if not run_async:
+            return sv.run_nest(s, d, j, body)
+        sv.prepare_nest(s, j, body)            # bad input fails now, not in the background
+        t = _worker(request).submit("nest", body.model_dump(exclude_none=True), job_id=jid)
+        return _task_response(s, t)
 
     @r.post("/jobs/{jid}/export", response_model=ExportOut)
     def export_job(jid: int, body: ExportIn, s: S, d: D):
-        return sv.run_export(s, d, _get(s, Job, jid, "Job"), body)
+        return sv.run_export(s, d, _job(s, jid), body)
 
     @r.get("/jobs/{jid}/checks", response_model=ChecksOut)
     def job_checks(jid: int, s: S, q: Annotated[ChecksQuery, Query()]):
-        return sv.run_checks(s, _get(s, Job, jid, "Job"), q)
+        return sv.run_checks(s, _job(s, jid), q)
 
     @r.get("/jobs/{jid}/export.zip")
     def export_zip(jid: int, s: S, d: D, all: bool = False):
-        j = _get(s, Job, jid, "Job")
+        j = _job(s, jid)
         data = sv.export_zip(d, j, all_revisions=all)
         name = sv.slug(j.name, f"job{j.id}") + ".zip"
         return Response(data, media_type="application/zip",
@@ -317,20 +411,24 @@ def build_router() -> APIRouter:
 
     @r.get("/jobs/{jid}/files/{name}")
     def job_file(jid: int, name: str, s: S, d: D):
-        path = sv.job_file_path(d, _get(s, Job, jid, "Job"), name)
+        path = sv.job_file_path(d, _job(s, jid), name)
         return FileResponse(path, filename=name, media_type=_media_type(name))
 
     @r.post("/jobs/{jid}/commit", response_model=CommitOut)
     def commit_job(jid: int, s: S):
-        j = _get(s, Job, jid, "Job")
+        j = _job(s, jid)
+        if sv.active_task(s, "nest", jid) is not None:
+            raise sv.UserError("This job is being nested: wait for the nest to finish", 409, "task_busy")
         saved, used = sv.commit_job(s, j)
         return {**sv.job_detail(s, j), "offcuts_saved": [sv.offcut_out(o) for o in saved],
                 "offcuts_used": used}
 
     # --- relief ---
-    @r.post("/relief", response_model=ReliefOut)
+    @r.post("/relief", response_model=ReliefOut,
+            responses={202: {"model": TaskOut, "description": "?async=1: the queued task (ref = relief id)"}})
     def create_relief(
-        s: S, d: D,
+        request: Request, s: S, d: D,
+        run_async: Async = False,
         image: UploadFile = File(...),
         width_mm: float = Form(...),
         material_mm: float = Form(...),
@@ -361,16 +459,33 @@ def build_router() -> APIRouter:
             params = ReliefIn(**raw).model_dump(exclude_none=True)
         except ValueError as e:
             raise sv.UserError(_first_error(e)) from e
-        return sv.create_relief(s, d, image, params)
+        if not run_async:
+            return sv.create_relief(s, d, image, params)
+        run = sv.store_relief_upload(d, image, params)
+        s.add(run)
+        s.commit()
+        t = _worker(request).submit("relief", {"create": True}, ref=run.id)
+        return _task_response(s, t)
+
+    def _relief_ready(s: Session, rid: str) -> ReliefRun:
+        run = _get(s, ReliefRun, rid, "Relief")
+        if sv.active_task(s, "relief", ref=rid) is not None or run.result_json in (None, "", "{}"):
+            raise sv.UserError("This relief is still being made", 409, "task_busy")
+        return run
 
     @r.get("/relief/{rid}", response_model=ReliefOut)
     def get_relief(rid: str, s: S):
-        return sv.relief_out(_get(s, ReliefRun, rid, "Relief"))
+        return sv.relief_out(_relief_ready(s, rid))
 
-    @r.post("/relief/{rid}", response_model=ReliefOut)
-    def rerun_relief(rid: str, body: ReliefIn, s: S, d: D):
-        run = _get(s, ReliefRun, rid, "Relief")
-        return sv.rerun_relief(s, d, run, body.model_dump(exclude_unset=True, exclude_none=True))
+    @r.post("/relief/{rid}", response_model=ReliefOut,
+            responses={202: {"model": TaskOut, "description": "?async=1: the queued task"}})
+    def rerun_relief(rid: str, body: ReliefIn, request: Request, s: S, d: D, run_async: Async = False):
+        run = _relief_ready(s, rid)
+        changes = body.model_dump(exclude_unset=True, exclude_none=True)
+        if not run_async:
+            return sv.rerun_relief(s, d, run, changes)
+        t = _worker(request).submit("relief", {"create": False, "changes": changes}, ref=rid)
+        return _task_response(s, t)
 
     @r.get("/relief/{rid}/files/{name}")
     def relief_file(rid: str, name: str, s: S, d: D):
@@ -379,6 +494,49 @@ def build_router() -> APIRouter:
         _get(s, ReliefRun, rid, "Relief")
         path = sv.safe_file(sv.relief_dir(d, rid), name)
         return FileResponse(path, filename=name, media_type=_media_type(name))
+
+    # --- background tasks ---
+    @r.get("/tasks", response_model=list[TaskOut])
+    def list_tasks(s: S, job_id: int | None = None, kind: str | None = None, ref: str | None = None,
+                   active: bool = False, limit: int = Query(20, ge=1, le=200)):
+        q = select(Task)
+        if job_id is not None:
+            q = q.where(Task.job_id == job_id)
+        if kind:
+            q = q.where(Task.kind == kind)
+        if ref:
+            q = q.where(Task.ref == ref)
+        if active:
+            q = q.where(Task.status.in_(sv.ACTIVE))
+        return [sv.task_out(t) for t in s.scalars(q.order_by(Task.id.desc()).limit(limit))]
+
+    @r.get("/tasks/{tid}", response_model=TaskOut)
+    def get_task(tid: int, s: S):
+        return sv.task_out(_get(s, Task, tid, "Task"))
+
+    @r.post("/tasks/{tid}/cancel", response_model=TaskOut)
+    def cancel_task(tid: int, request: Request, s: S):
+        _get(s, Task, tid, "Task")
+        _worker(request).cancel(tid)
+        s.expire_all()
+        return sv.task_out(_get(s, Task, tid, "Task"))
+
+    # --- admin: backup ---
+    @r.get("/admin/backup", response_model=BackupOut)
+    def backup_info(request: Request, d: D):
+        last = backup_mod.last_backup(d) or {}
+        return {"time": last.get("time"), "path": last.get("path"), "size": last.get("size"),
+                "folder": request.app.state.backup_dir}
+
+    @r.post("/admin/backup", response_model=BackupOut)
+    def backup_now(request: Request, d: D):
+        try:
+            info = backup_mod.make_backup(d, request.app.state.backup_dir)
+        except OSError as e:
+            log.exception("backup failed")
+            raise sv.UserError(f"Backup failed: {e}", 500, "backup_failed") from e
+        log.info("backup written: %s", info["path"])
+        return info
 
     @r.api_route("/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
     def api_not_found(rest: str):
@@ -450,21 +608,80 @@ def add_web(app: FastAPI, web_dir: str) -> None:
 
 # ---------- app factory ----------
 
-def create_app(data_dir: str | None = None, web_dir: str | None = None) -> FastAPI:
+def error_json(status: int, message: str, code: str | None = None) -> JSONResponse:
+    """Every API error: {detail, code, message, request_id}. `detail` stays for
+    older clients; the UI translates `code` (web/i18n.js err_<code>)."""
+    code = code or sv.STATUS_CODES.get(status, "server_error" if status >= 500 else "error")
+    return JSONResponse({"detail": message, "code": code, "message": message, "request_id": request_id.get()},
+                        status_code=status)
+
+
+def create_app(data_dir: str | None = None, web_dir: str | None = None, backup_dir: str | None = None,
+               start_worker: bool = True) -> FastAPI:
     db = get_database(data_dir or default_data_dir())
+    setup_logging(db.data_dir)
     with db.session() as s:
         seed(s)
+    worker = Worker(db)
 
-    app = FastAPI(title="Nest", version=sv.VERSION)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if start_worker:
+            worker.start()
+        log.info("Nest %s started on %s", sv.VERSION, db.data_dir)
+        try:
+            yield
+        finally:
+            await run_in_threadpool(worker.stop)
+
+    app = FastAPI(title="Nest", version=sv.VERSION, lifespan=lifespan)
     app.state.db = db
+    app.state.worker = worker
+    app.state.started_at = time.time()
+    app.state.backup_dir = os.path.abspath(backup_dir) if backup_dir else backup_mod.default_backup_dir()
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        rid = (request.headers.get("x-request-id") or "")[:40] or new_request_id()
+        token = request_id.set(rid)
+        t0 = time.perf_counter()
+        try:
+            try:
+                response = await call_next(request)
+            except Exception:  # noqa: BLE001
+                log.exception("unhandled error on %s %s", request.method, request.url.path)
+                response = error_json(500, "Something went wrong on the server. The details are in the log "
+                                           f"(request {rid}).", "server_error")
+            response.headers["X-Request-ID"] = rid
+            path = request.url.path
+            if path.startswith("/api/"):
+                ms = (time.perf_counter() - t0) * 1000
+                quiet = request.method == "GET" and path.startswith("/api/tasks") and response.status_code < 400
+                log.log(logging.DEBUG if quiet else logging.INFO, "%s %s %s %.0f ms", request.method, path,
+                        response.status_code, ms)
+            return response
+        finally:
+            request_id.reset(token)
 
     @app.exception_handler(sv.UserError)
-    async def user_error(_request: Request, exc: sv.UserError):
-        return JSONResponse({**exc.extra, "detail": exc.message}, status_code=exc.status)
+    async def user_error(request: Request, exc: sv.UserError):
+        if exc.status >= 500:
+            log.error("%s %s: %s", request.method, request.url.path, exc.message)
+        resp = error_json(exc.status, exc.message, exc.code)
+        if exc.extra:
+            import json as _json
+            body = _json.loads(resp.body)
+            resp = JSONResponse({**exc.extra, **body}, status_code=exc.status)
+        return resp
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(_request: Request, exc: RequestValidationError):
-        return JSONResponse({"detail": _first_error(exc)}, status_code=400)
+        return error_json(400, _first_error(exc), "bad_input")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_request: Request, exc: StarletteHTTPException):
+        msg = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        return error_json(exc.status_code, msg)
 
     app.include_router(build_router())
     add_web(app, web_dir or WEB_DIR)

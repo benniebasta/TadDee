@@ -1,5 +1,5 @@
 // Small shared UI helpers: element builder, toast, busy buttons, dialogs, formatting.
-import { t } from './i18n.js';
+import { t, getLang, hasKey } from './i18n.js';
 
 // h('div', {class: 'x', testid: 'y', onclick: fn}, child, ...) -> HTMLElement
 export function h(tag, attrs = {}, ...children) {
@@ -48,7 +48,19 @@ export function toast(message, type = 'error') {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.className = 'toast'; }, type === 'error' ? 7000 : 3500);
 }
-export const toastError = (e) => toast(e?.message || String(e), 'error');
+export const toastError = (e) => toast(errorText(e), 'error');
+
+// Error text in the chosen language. The server writes English sentences plus
+// a code; Thai shows the Thai text of the code (with the detail for input errors).
+const DETAIL_CODES = new Set(['bad_input', 'not_found', 'conflict', 'too_large', 'backup_failed']);
+export function errorText(e) {
+  const msg = e?.message || String(e ?? '');
+  const code = e?.code;
+  if (!code || !hasKey(`err_${code}`)) return msg;
+  if (getLang() === 'en') return msg || t(`err_${code}`);
+  if (DETAIL_CODES.has(code)) return msg ? `${t(`err_${code}`)}: ${msg}` : t(`err_${code}`);
+  return t(`err_${code}`) + (e.requestId && code === 'server_error' ? ` (${e.requestId})` : '');
+}
 
 // ---- busy buttons ----------------------------------------------------------
 // Disable the button, show a spinner text while fn runs; errors go to the toast.
@@ -195,6 +207,10 @@ const ICONS = {
   pause: 'M8 5v14M16 5v14',
   prev: 'M18 6l-8 6 8 6zM6 6v12',
   next: 'M6 6l8 6-8 6zM18 6v12',
+  copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
+  lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
+  restore: 'M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4',
+  backup: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
 };
 export function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg';

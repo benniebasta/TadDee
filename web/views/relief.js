@@ -2,7 +2,12 @@
 import { api, url } from '../api.js';
 import { t } from '../i18n.js';
 import { simButton, isNc } from './sim.js';
-import { h, fill, field, select, busy, toast, num, numVal, icon, panelSection, canvasView } from '../ui.js';
+import { h, fill, field, select, busy, toast, toastError, num, numVal, icon, panelSection, canvasView } from '../ui.js';
+import { taskBar, follow, taskError, isActive } from '../task.js';
+
+const TASK_KEY = 'nest.relief.task';   // the task this browser is waiting for (survives a reload)
+const remember = (id) => { try { if (id) localStorage.setItem(TASK_KEY, String(id)); else localStorage.removeItem(TASK_KEY); } catch { /* private mode */ } };
+const remembered = () => { try { return localStorage.getItem(TASK_KEY); } catch { return null; } };
 
 const PROFILES = ['dome', 'flat', 'bevel', 'engrave', 'background'];
 
@@ -22,6 +27,24 @@ export async function render(root, _params, isCurrent) {
   if (!isCurrent()) return;
 
   const S = { result: null };
+  const alive = () => root.isConnected && isCurrent();
+  const bar = taskBar('relief-progress', 'relief-cancel');
+
+  // Relief runs as a background task; the result shows when it is done.
+  async function followRelief(task) {
+    remember(task.id);
+    const fin = await follow(task, bar, alive);
+    if (!fin || !alive()) return;            // page left: the task id stays remembered
+    remember(null);
+    if (fin.status === 'done' || (fin.status === 'cancelled' && fin.result?.relief_id)) {
+      S.result = await api.get(`/relief/${encodeURIComponent(fin.result?.relief_id || fin.ref)}`);
+      renderResult();
+      if (fin.status === 'cancelled') toast(t('relief_cancelled'), 'ok');
+      return true;
+    }
+    if (fin.status === 'cancelled') { toast(t('relief_cancelled'), 'ok'); return false; }
+    throw taskError(fin);
+  }
   const flats = bitOptions(tools, 'flat'), balls = bitOptions(tools, 'ball');
   const roughOpts = [...flats, ...balls].map((v) => ({ value: v, label: bitLabel(v) }));
   roughOpts.push({ value: 'none', label: t('no_rough') });
@@ -62,8 +85,7 @@ export async function render(root, _params, isCurrent) {
     const fd = new FormData();
     fd.append('image', f, f.name);
     for (const [k, v] of Object.entries(p)) if (v !== undefined) fd.append(k, String(v));
-    S.result = await api.upload('/relief', fd);
-    renderResult();
+    await followRelief(await api.upload('/relief?async=1', fd));
   }, t('making_relief')));
 
   // Region style rows (kept so Update can read them).
@@ -102,9 +124,9 @@ export async function render(root, _params, isCurrent) {
         ...(g.base_mm !== undefined ? { base_mm: g.base_mm } : {}) }));
       const p = params();
       for (const k of Object.keys(p)) if (p[k] === undefined) delete p[k];
-      S.result = await api.post(`/relief/${encodeURIComponent(r.id)}`, { ...p, styles });
-      renderResult();
-      toast(t('relief_updated'), 'ok');
+      if (await followRelief(await api.post(`/relief/${encodeURIComponent(r.id)}?async=1`, { ...p, styles }))) {
+        toast(t('relief_updated'), 'ok');
+      }
     }, t('making_relief')));
 
     const files = (r.files || []).map((f, i) => h('div', { class: 'file' },
@@ -149,11 +171,28 @@ export async function render(root, _params, isCurrent) {
           field(t('width_mm'), width), field(t('material_mm'), material),
           field(t('max_height_mm'), height), h('span'),
           field(t('rough_bit'), rough), field(t('finish_bit'), finish)),
-        h('div', { class: 'row' }, runBtn)),
+        h('div', { class: 'row' }, runBtn),
+        bar.el),
       panelSection({ title: t('regions'), step: '2' }, regionsBox),
       panelSection({ title: t('files'), step: '3' }, filesBox)),
     statusBar));
   renderResult();
+
+  // page reloaded while a relief was being made: show its progress, then its result
+  (async () => {
+    let task = null;
+    const mine = remembered();
+    try {
+      if (mine) task = await api.get(`/tasks/${encodeURIComponent(mine)}`);
+    } catch { remember(null); }
+    if (!isActive(task) && !(task && task.status === 'done')) {
+      try { task = (await api.get('/tasks?kind=relief&active=1'))[0] || task; } catch { /* older server */ }
+    }
+    if (!task || !alive()) return;
+    if (isActive(task)) busy(runBtn, () => followRelief(task), t('making_relief'));
+    else if (task.status === 'done') followRelief(task).catch(toastError);
+    else remember(null);
+  })();
 }
 
 function bitLabel(v) {
