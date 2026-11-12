@@ -787,7 +787,7 @@ def _gcode_info(meta: dict, n: int, tool, c: _Ctx) -> list[str]:
         f"MATERIAL {meta['material']} - THICKNESS {meta['thickness']:g} mm",
         f"BIT {tool.name} - FEED {tool.feed_mm_min:g} - PLUNGE {tool.plunge_mm_min:g} - RPM {tool.rpm}"
         f" - PASS {tool.pass_depth_mm:g} - RAMP {tool.ramp_mm:g} mm",
-        f"DATE {meta['date']} - Nest {meta['version']}",
+        f"DATE {meta['date']} - TadDee {meta['version']}",
     ]
 
 

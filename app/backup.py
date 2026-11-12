@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             if not a.to:
                 ap.error("--restore needs --to <empty folder>")
             out = restore(a.restore, a.to)
-            print(f"Restored into {out}. Start Nest with NEST_DATA_DIR={out}")
+            print(f"Restored into {out}. Start TadDee with TADDEE_DATA_DIR={out}")
         else:
             info = make_backup(a.data, a.to, a.keep)
             print(f"Backup written: {info['path']} ({info['size'] / 1e6:.1f} MB)"

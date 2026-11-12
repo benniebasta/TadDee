@@ -1,8 +1,11 @@
-# Nest app
+# TadDee (ตัดดี)
 
 Our own nesting app for the factory: SVG/DXF parts in, packed sheets out,
 NC Studio G-code (router, no tool changer) or Ruida DXF (laser), offcut
 library, cost estimate, and 3D relief from a picture. Full spec: PLAN.md.
+
+Settings use `TADDEE_*` environment variables (`TADDEE_PORT`, `TADDEE_DATA_DIR`,
+`TADDEE_BACKUP_DIR`); the old `NEST_*` names still work.
 
 ## Start
     pip install -r requirements.txt
@@ -11,7 +14,7 @@ Tests: `python -m pytest -q` (127 unit/API tests). Browser test: start the
 app on an empty data folder, then `node e2e/e2e.mjs`.
 
 ## Running it in the shop
-- **Data folder** (`NEST_DATA_DIR`, default `./data`): `nest.db`, `jobs/<id>/`
+- **Data folder** (`TADDEE_DATA_DIR`, default `./data`): `nest.db`, `jobs/<id>/`
   (exported files), `relief/<id>/`, `logs/nest.log`.
 - **Background work:** nesting and relief run in a worker inside the app,
   one at a time per kind. The page shows progress and Cancel and picks the
@@ -36,7 +39,7 @@ app on an empty data folder, then `node e2e/e2e.mjs`.
 ## Backup
     python -m app.backup                 # Windows: backup.bat
 Makes `nest-YYYYMMDD-HHMMSS-mmm.zip` (a consistent copy of the database plus
-all job and relief files) in `NEST_BACKUP_DIR` (default `D:\Site backups\nest`
+all job and relief files) in `TADDEE_BACKUP_DIR` (default `D:\Site backups\nest`
 on Windows, `./backups` elsewhere) and keeps the newest 14. Settings has a
 "Back up now" button and shows the last backup time.
 
@@ -48,7 +51,7 @@ with the real install folder):
 Restore (only into an empty or new folder, then start Nest on it):
 
     python -m app.backup --restore "D:\Site backups\nest\nest-20261112-233000-000.zip" --to C:\nest\data-restored
-    set NEST_DATA_DIR=C:\nest\data-restored
+    set TADDEE_DATA_DIR=C:\nest\data-restored
     run.bat
 
 # 3D relief module

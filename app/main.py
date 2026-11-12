@@ -613,7 +613,7 @@ def add_web(app: FastAPI, web_dir: str) -> None:
         p = os.path.join(root, "index.html")
         if os.path.isfile(p):
             return FileResponse(p, media_type="text/html")
-        return HTMLResponse("<!doctype html><title>Nest</title><p>Nest is running. The web UI files "
+        return HTMLResponse("<!doctype html><title>TadDee</title><p>TadDee is running. The web UI files "
                             "(web/index.html) are missing.</p>", status_code=200)
 
     @app.get("/", include_in_schema=False)
@@ -662,7 +662,7 @@ def create_app(data_dir: str | None = None, web_dir: str | None = None, backup_d
         finally:
             await run_in_threadpool(worker.stop)
 
-    app = FastAPI(title="Nest", version=sv.VERSION, lifespan=lifespan)
+    app = FastAPI(title="TadDee", version=sv.VERSION, lifespan=lifespan)
     app.state.db = db
     app.state.worker = worker
     app.state.started_at = time.time()

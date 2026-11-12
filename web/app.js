@@ -39,7 +39,7 @@ function renderRail() {
     'aria-label': t(dark ? 'theme_light' : 'theme_dark'),
     onclick: () => { applyTheme(getTheme() === 'dark' ? 'light' : 'dark'); renderRail(); } }, icon(dark ? 'sun' : 'moon', 18));
   bar.replaceChildren(
-    h('a', { class: 'rail-brand', href: '#/jobs', title: 'Nest' }, h('span', { class: 'logo' }, 'N')),
+    h('a', { class: 'rail-brand', href: '#/jobs', title: 'TadDee' }, h('span', { class: 'logo' }, 'T')),
     ...NAV.map((n) => h('a', { href: n.href, class: `rail-item${n.match.test(path) ? ' active' : ''}`,
       testid: `nav-${n.key.slice(4)}`, 'aria-current': n.match.test(path) ? 'page' : null },
     icon(n.icon, 22), h('span', {}, t(n.key)))),

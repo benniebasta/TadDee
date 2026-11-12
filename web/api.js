@@ -28,7 +28,7 @@ async function request(method, path, { json, form } = {}) {
   try {
     res = await fetch(BASE + path, opts);
   } catch (e) {
-    throw apiError('Cannot reach the Nest server. Check the network.', 'network', 0);
+    throw apiError('Cannot reach the TadDee server. Check the network.', 'network', 0);
   }
   if (res.status === 204) return null;
   const text = await res.text();

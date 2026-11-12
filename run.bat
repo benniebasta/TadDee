@@ -1,5 +1,5 @@
 @echo off
-rem Start Nest on this PC: http://localhost:8040 (other PCs: http://PC-NAME:8040)
+rem Start TadDee on this PC: http://localhost:8040 (other PCs: http://PC-NAME:8040)
 rem First run makes a Python virtual environment in .venv and installs the packages.
 setlocal
 cd /d "%~dp0"
@@ -19,7 +19,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-if "%NEST_PORT%"=="" set NEST_PORT=8040
-echo Starting Nest on port %NEST_PORT% ...
+if "%TADDEE_PORT%"=="" set TADDEE_PORT=8040
+echo Starting TadDee on port %TADDEE_PORT% ...
 ".venv\Scripts\python.exe" -m app
 pause

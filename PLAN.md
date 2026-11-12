@@ -1,4 +1,4 @@
-# Nest app: implementation plan
+# TadDee: implementation plan
 
 Our own nesting and CNC/laser output app for the AD ON group factory. It is not a copy of any other product. All code, UI text and design are ours. Learn from public behaviour only.
 
@@ -233,7 +233,7 @@ Seed (`app/seed.py`, only when tables are empty): machines "Router (NC Studio)" 
 ### 4.8 Web UI (`web/`)
 Single page, hash routes, plain ES modules, no CDN (works offline). Light theme only: white background, dark text, one accent colour (`#1f6feb`), soft grey borders, 8 px radius, system font stack plus "Noto Sans Thai". Big touch targets (min 40 px) for the shop floor. All numbers mm unless stated. Labels in English through `i18n.js` (`t(key)`) with a Thai dictionary ready (`th`); a language switch in the top bar stores the choice in `localStorage`.
 
-Top bar: app name "Nest", nav: Jobs, Relief, Offcuts, Settings, language switch.
+Top bar: app name "TadDee", nav: Jobs, Relief, Offcuts, Settings, language switch.
 
 Views and **required `data-testid`s** (the e2e test depends on them, do not rename):
 1. **Jobs** `#/jobs`: table of jobs (`jobs-table`, rows `job-row`), button **New job** (`new-job`) opens a form (`job-name`, `job-material` select, `job-machine` select, `job-create`). Click a row -> job page.

@@ -497,3 +497,12 @@ def test_i18n_dictionaries_have_the_same_keys():
     for k in ("backup_now", "bin", "restore", "unlock", "duplicate", "cancel_task", "err_job_locked",
               "err_task_busy", "err_server_error", "health"):
         assert k in en, k
+
+
+def test_taddee_env_names_map_to_nest(monkeypatch):
+    import importlib, os
+    import app as app_pkg
+    monkeypatch.setenv("TADDEE_PORT", "8123")
+    monkeypatch.setenv("NEST_PORT", "8040")
+    importlib.reload(app_pkg)
+    assert os.environ["NEST_PORT"] == "8123"

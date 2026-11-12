@@ -168,7 +168,7 @@ def test_export_revisions_increment_and_old_files_remain(client):
     assert "(JOB Rev - ID %d)" % jid in head and "(SHEET 1 OF 1 - REVISION 1)" in head
     assert any(h.startswith("(MATERIAL Acrylic 3 mm - THICKNESS 3 mm)") for h in head)
     assert any(h.startswith("(BIT 6 mm flat 2-flute") for h in head)
-    assert any(re.match(r"\(DATE \d{4}-\d\d-\d\d \d\d:\d\d - Nest \d", h) for h in head)
+    assert any(re.match(r"\(DATE \d{4}-\d\d-\d\d \d\d:\d\d - TadDee \d", h) for h in head)
     assert "REVISION 2" in client.get(f2["url"]).text
 
     # a refused export does not use up a revision number
