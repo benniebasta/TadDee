@@ -11,7 +11,7 @@ import os
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy import select
@@ -19,8 +19,9 @@ from sqlalchemy.orm import Session
 
 from . import services as sv
 from .db import Database, default_data_dir, get_database, session_scope
-from .models import Job, JobPart, Machine, Material, Offcut, ReliefRun, Tool
-from .schemas import (CommitOut, ExportIn, ExportOut, JobCreate, JobDetail, JobListItem, JobUpdate,
+from .models import FeedOverride, Job, JobPart, Machine, Material, Offcut, ReliefRun, Tool
+from .schemas import (ChecksOut, ChecksQuery, CommitOut, ExportIn, ExportOut, FeedIn, FeedOut, FeedUpdate,
+                      JobCreate, JobDetail, JobListItem, JobUpdate,
                       MachineIn, MachineOut, MachineUpdate, MaterialIn, MaterialOut, MaterialUpdate, NestIn,
                       NestOut, OffcutOut, PartOut, PartUpdate, ReliefIn, ReliefOut, ToolIn, ToolOut, ToolUpdate,
                       UploadOut)
@@ -127,7 +128,10 @@ def build_router() -> APIRouter:
 
     @r.delete("/tools/{tid}", status_code=204)
     def delete_tool(tid: int, s: S):
-        s.delete(_get(s, Tool, tid, "Tool"))
+        t = _get(s, Tool, tid, "Tool")
+        for f in s.scalars(select(FeedOverride).where(FeedOverride.tool_id == tid)):
+            s.delete(f)
+        s.delete(t)
         s.commit()
         return Response(status_code=204)
 
@@ -161,7 +165,50 @@ def build_router() -> APIRouter:
             j.material_id = None
         for o in s.scalars(select(Offcut).where(Offcut.material_id == mid)):
             s.delete(o)
+        for f in s.scalars(select(FeedOverride).where(FeedOverride.material_id == mid)):
+            s.delete(f)
         s.delete(m)
+        s.commit()
+        return Response(status_code=204)
+
+    # --- feeds and speeds (material x bit overrides) ---
+    @r.get("/feeds", response_model=list[FeedOut])
+    def list_feeds(s: S, material_id: int | None = None, tool_id: int | None = None):
+        q = select(FeedOverride).order_by(FeedOverride.material_id, FeedOverride.tool_id)
+        if material_id is not None:
+            q = q.where(FeedOverride.material_id == material_id)
+        if tool_id is not None:
+            q = q.where(FeedOverride.tool_id == tool_id)
+        return [sv.feed_out(f) for f in s.scalars(q)]
+
+    @r.post("/feeds", response_model=FeedOut, status_code=201)
+    def create_feed(body: FeedIn, s: S):
+        _get(s, Material, body.material_id, "Material")
+        _get(s, Tool, body.tool_id, "Tool")
+        if sv.feed_for(s, body.material_id, body.tool_id) is not None:
+            raise sv.UserError("This material and bit already have feeds and speeds: edit that row", 409)
+        f = FeedOverride(**body.model_dump())
+        s.add(f)
+        s.commit()
+        return sv.feed_out(f)
+
+    @r.get("/feeds/{fid}", response_model=FeedOut)
+    def get_feed(fid: int, s: S):
+        return sv.feed_out(_get(s, FeedOverride, fid, "Feeds row"))
+
+    @r.put("/feeds/{fid}", response_model=FeedOut)
+    def update_feed(fid: int, body: FeedUpdate, s: S):
+        f = _get(s, FeedOverride, fid, "Feeds row")
+        changes = body.model_dump(exclude_unset=True)
+        if changes.get("notes", "") is None:
+            changes["notes"] = ""
+        _apply(f, changes)           # a value sent as null clears that override
+        s.commit()
+        return sv.feed_out(f)
+
+    @r.delete("/feeds/{fid}", status_code=204)
+    def delete_feed(fid: int, s: S):
+        s.delete(_get(s, FeedOverride, fid, "Feeds row"))
         s.commit()
         return Response(status_code=204)
 
@@ -256,18 +303,21 @@ def build_router() -> APIRouter:
     def export_job(jid: int, body: ExportIn, s: S, d: D):
         return sv.run_export(s, d, _get(s, Job, jid, "Job"), body)
 
+    @r.get("/jobs/{jid}/checks", response_model=ChecksOut)
+    def job_checks(jid: int, s: S, q: Annotated[ChecksQuery, Query()]):
+        return sv.run_checks(s, _get(s, Job, jid, "Job"), q)
+
     @r.get("/jobs/{jid}/export.zip")
-    def export_zip(jid: int, s: S, d: D):
+    def export_zip(jid: int, s: S, d: D, all: bool = False):
         j = _get(s, Job, jid, "Job")
-        data = sv.export_zip(d, j)
+        data = sv.export_zip(d, j, all_revisions=all)
         name = sv.slug(j.name, f"job{j.id}") + ".zip"
         return Response(data, media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @r.get("/jobs/{jid}/files/{name}")
     def job_file(jid: int, name: str, s: S, d: D):
-        _get(s, Job, jid, "Job")
-        path = sv.safe_file(sv.job_dir(d, jid), name)
+        path = sv.job_file_path(d, _get(s, Job, jid, "Job"), name)
         return FileResponse(path, filename=name, media_type=_media_type(name))
 
     @r.post("/jobs/{jid}/commit", response_model=CommitOut)
@@ -410,7 +460,7 @@ def create_app(data_dir: str | None = None, web_dir: str | None = None) -> FastA
 
     @app.exception_handler(sv.UserError)
     async def user_error(_request: Request, exc: sv.UserError):
-        return JSONResponse({"detail": exc.message}, status_code=exc.status)
+        return JSONResponse({**exc.extra, "detail": exc.message}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(_request: Request, exc: RequestValidationError):

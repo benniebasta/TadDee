@@ -29,14 +29,21 @@ def _kerf_rings(ring_pts, distance: float):
 
 
 def write_ruida_dxf(path: str, sheet: SheetResult, parts: dict[str, Part], *,
-                    kerf_mm: float = 0.0, include_sheet_outline: bool = False) -> int:
+                    kerf_mm: float = 0.0, include_sheet_outline: bool = False,
+                    info: dict[str, str] | None = None) -> int:
     """Write the sheet as DXF and return the number of entities written.
     With kerf_mm > 0 outlines move out by kerf/2 and holes move in by kerf/2,
-    so the finished part comes out at its drawn size. Marks are never offset."""
+    so the finished part comes out at its drawn size. Marks are never offset.
+
+    `info` (job, sheet, revision, material, date...) is stored as DXF custom
+    header properties only, never as entities: the laser software would treat
+    a text entity as something to burn. The revision is also in the file name."""
     doc = ezdxf.new("R2010", setup=False)
     doc.header["$INSUNITS"] = 4        # millimetres
     doc.header["$MEASUREMENT"] = 1     # metric
     doc.units = 4
+    for key, value in (info or {}).items():
+        doc.header.custom_vars.append(str(key)[:64], str(value)[:250])
     for name, colour in LAYER_COLOURS.items():
         if name == "SHEET" and not include_sheet_outline:
             continue

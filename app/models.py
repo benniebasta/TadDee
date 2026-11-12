@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -36,6 +36,7 @@ class Tool(Base):
     plunge_mm_min: Mapped[float] = mapped_column(Float, default=800.0)
     rpm: Mapped[int] = mapped_column(Integer, default=18000)
     pass_depth_mm: Mapped[float] = mapped_column(Float, default=3.0)
+    ramp_mm: Mapped[float] = mapped_column(Float, default=12.0, server_default="12")  # 0 = straight plunge
 
 
 class Material(Base):
@@ -47,6 +48,21 @@ class Material(Base):
     sheet_h: Mapped[float] = mapped_column(Float)
     price_per_sheet: Mapped[float] = mapped_column(Float, default=0.0)  # THB, excl. VAT; 0 = not set
     margin_mm: Mapped[float] = mapped_column(Float, default=10.0)
+
+
+class FeedOverride(Base):
+    """Feeds and speeds library: what one bit runs at in one material. Every
+    value is optional; None = use the bit's own default."""
+    __tablename__ = "feeds"
+    __table_args__ = (UniqueConstraint("material_id", "tool_id", name="uq_feeds_material_tool"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[int] = mapped_column(ForeignKey("materials.id"), index=True)
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id"), index=True)
+    feed_mm_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    plunge_mm_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rpm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pass_depth_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
 
 
 class Job(Base):
