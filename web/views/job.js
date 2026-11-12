@@ -1,8 +1,8 @@
 // Job page (#/jobs/:id): Parts -> Nest -> Export on one page.
 import { api, url } from '../api.js';
 import { t } from '../i18n.js';
-import { h, fill, field, select, busy, toast, toastError, confirmDialog, overlay, svgBox,
-  num, money, pct, idOf, numVal } from '../ui.js';
+import { h, fill, field, select, busy, toast, toastError, confirmDialog, svgBox,
+  num, money, pct, idOf, numVal, icon, panelSection, canvasView } from '../ui.js';
 import { idNum } from './jobs.js';
 
 // Nest option tables (values are stable for tests; labels are translated).
@@ -21,7 +21,7 @@ function range(a, b, s) { const r = []; for (let x = a; x < b; x += s) r.push(x)
 const countOf = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
 
 export async function render(root, { id }, isCurrent) {
-  const S = { job: null, materials: [], machines: [], tools: [], warnings: [], gapTouched: false };
+  const S = { job: null, materials: [], machines: [], tools: [], warnings: [], gapTouched: false, active: 0 };
   try {
     [S.job, S.materials, S.machines, S.tools] = await Promise.all([
       api.get(`/jobs/${encodeURIComponent(id)}`), api.get('/materials'), api.get('/machines'), api.get('/tools')]);
@@ -83,7 +83,7 @@ export async function render(root, { id }, isCurrent) {
   const partsEmpty = h('p', { class: 'empty' }, t('no_parts'));
   const fileInput = h('input', { type: 'file', testid: 'file-input', accept: '.svg,.dxf', multiple: true, id: 'file-input' });
   const dropLabel = h('span', {}, t('drop_files'));
-  const drop = h('label', { class: 'dropzone', for: 'file-input' }, h('strong', {}, t('choose_files')), dropLabel,
+  const drop = h('label', { class: 'dropzone', for: 'file-input' }, icon('upload', 22), h('strong', {}, t('choose_files')), dropLabel,
     h('span', { class: 'muted small' }, t('file_types')));
 
   async function upload(files) {
@@ -172,12 +172,13 @@ export async function render(root, { id }, isCurrent) {
         h('td', {}, qty),
         h('td', { class: 'num' }, del));
     }));
+    renderCanvas();
+    renderStatus();
   }
 
-  const partsCard = h('section', { class: 'card' },
-    h('h2', {}, h('span', { class: 'step' }, '1'), t('parts')),
+  const partsCard = panelSection({ title: t('parts'), step: '1', testid: 'panel-parts' },
     drop, fileInput, warnBox,
-    h('div', { class: 'table-wrap' }, h('table', { testid: 'parts-table' },
+    h('div', { class: 'table-wrap' }, h('table', { testid: 'parts-table', class: 'compact' },
       h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, t('name')), h('th', { class: 'num' }, t('size_mm')),
         h('th', { class: 'num hide-sm' }, t('holes')), h('th', {}, t('qty')), h('th', {}, ''))),
       partsBody)),
@@ -202,7 +203,7 @@ export async function render(root, { id }, isCurrent) {
   const offcutChk = h('input', { type: 'checkbox', testid: 'nest-offcuts', checked: st.use_offcuts ?? false });
   const sheetW = h('input', { type: 'number', min: '1', step: '1', testid: 'nest-sheet-w', inputmode: 'decimal' });
   const sheetH = h('input', { type: 'number', min: '1', step: '1', testid: 'nest-sheet-h', inputmode: 'decimal' });
-  const nestBtn = h('button', { class: 'btn primary big', testid: 'nest-run' }, t('nest'));
+  const nestBtn = h('button', { class: 'btn primary big block', testid: 'nest-run' }, icon('nest', 18), t('nest'));
   const nestResult = h('div', { class: 'nest-result' });
 
   const setSheetPlaceholders = () => {
@@ -249,6 +250,9 @@ export async function render(root, { id }, isCurrent) {
     const nest = S.job.nest;
     if (!nest || !Array.isArray(nest.sheets)) {
       nestResult.replaceChildren(h('p', { class: 'muted', testid: 'nest-empty' }, t('not_nested')));
+      renderStrip();
+      renderCanvas();
+      renderStatus();
       return;
     }
     const unplaced = nest.unplaced || [];
@@ -258,41 +262,52 @@ export async function render(root, { id }, isCurrent) {
       stat(t('utilisation'), pct(nest.utilisation), 'sum-util'),
       stat(t('unplaced'), unplacedCount, 'sum-unplaced', unplacedCount ? 'warn' : ''),
       h('div', { class: 'stat wide', testid: 'sum-cost' }, h('span', { class: 'stat-label' }, t('cost')), costLine(nest)));
-    const sheets = nest.sheets.map((s, i) => {
-      const caption = h('div', { class: 'sheet-cap' },
-        h('strong', {}, `${t('sheet')} ${(s.index ?? i) + 1}`),
-        s.is_offcut ? h('span', { class: 'badge status-nested' }, t('offcut')) : null,
-        h('span', {}, `${num(s.width)} × ${num(s.height)} mm`),
-        h('span', { testid: 'sheet-util' }, pct(s.utilisation)),
-        s.parts_count != null ? h('span', { class: 'muted' }, t('parts_n', { n: s.parts_count })) : null,
-        s.offcut ? h('span', { class: 'offcut-size', testid: 'sheet-offcut' }, `${t('leftover')} ${num(s.offcut.width)} × ${num(s.offcut.height)} mm`) : null);
-      const title = `${t('sheet')} ${(s.index ?? i) + 1} · ${pct(s.utilisation)}`;
-      return h('figure', { class: 'sheet', testid: 'sheet-preview', 'data-index': s.index ?? i, tabindex: '0', title: t('click_zoom'),
-        onclick: () => overlay(svgBox(s.svg, 'svg-box big'), title),
-        onkeydown: (e) => { if (e.key === 'Enter') overlay(svgBox(s.svg, 'svg-box big'), title); } },
-      svgBox(s.svg), h('figcaption', {}, caption));
-    });
     fill(nestResult, summary,
       unplaced.length ? h('div', { class: 'warnings', testid: 'nest-unplaced' }, h('strong', {}, t('unplaced_parts')),
         h('ul', {}, unplaced.map((u) => h('li', {}, `${u.name ?? u.part_id} × ${u.count}`)))) : null,
-      h('div', { class: 'sheets' }, sheets),
       nest.attempts != null ? h('p', { class: 'muted small' }, t('nest_meta', { a: nest.attempts, s: num(nest.elapsed_s, 1) })) : null);
+    if (S.active >= nest.sheets.length) S.active = 0;
+    renderStrip();
+    renderCanvas();
+    renderStatus();
   }
+
+  // ---- sheet strip under the canvas: one thumbnail per sheet, click to show it ----
+  const strip = h('div', { class: 'strip', testid: 'sheet-strip' });
+  function renderStrip() {
+    const nest = S.job.nest;
+    if (!nest || !Array.isArray(nest.sheets) || !nest.sheets.length) {
+      strip.classList.add('hidden');
+      strip.replaceChildren();
+      return;
+    }
+    strip.classList.remove('hidden');
+    strip.replaceChildren(...nest.sheets.map((s, i) => {
+      const n = (s.index ?? i) + 1;
+      const pick = () => { S.active = i; renderStrip(); renderCanvas(); };
+      return h('figure', { class: `sheet${i === S.active ? ' active' : ''}`, testid: 'sheet-preview', 'data-index': s.index ?? i,
+        tabindex: '0', title: t('click_show'), onclick: pick, onkeydown: (e) => { if (e.key === 'Enter') pick(); } },
+      svgBox(s.svg),
+      h('figcaption', { class: 'sheet-cap' }, h('strong', {}, `#${n}`), s.is_offcut ? h('span', { class: 'badge status-nested' }, t('offcut')) : null,
+        h('span', { testid: 'sheet-util' }, pct(s.utilisation))));
+    }));
+  }
+
   function stat(label, value, testid, cls = '') {
     return h('div', { class: `stat ${cls}`, testid }, h('span', { class: 'stat-label' }, label), h('span', { class: 'stat-value' }, value));
   }
 
-  const nestCard = h('section', { class: 'card' },
-    h('h2', {}, h('span', { class: 'step' }, '2'), t('nest')),
-    h('div', { class: 'grid-form' },
+  const nestCard = panelSection({ title: t('nest'), step: '2', testid: 'panel-nest' },
+    h('div', { class: 'grid-form two' },
       field(t('gap_mm'), gapIn, t('gap_hint')),
       field(t('rotations'), rotSel),
       field(t('quality'), qualSel),
+      h('span'),
       field(t('sheet_w'), sheetW, t('sheet_hint')),
-      field(t('sheet_h'), sheetH),
-      h('div', { class: 'checks' },
-        h('label', { class: 'check' }, holesChk, t('parts_in_holes')),
-        h('label', { class: 'check' }, offcutChk, t('use_offcuts')))),
+      field(t('sheet_h'), sheetH)),
+    h('div', { class: 'checks' },
+      h('label', { class: 'check' }, holesChk, t('parts_in_holes')),
+      h('label', { class: 'check' }, offcutChk, t('use_offcuts'))),
     h('div', { class: 'row' }, nestBtn),
     nestResult);
 
@@ -333,7 +348,7 @@ export async function render(root, { id }, isCurrent) {
     if (isLaser()) {
       const kerf = h('input', { type: 'number', min: '0', step: '0.05', value: '0', testid: 'export-kerf', inputmode: 'decimal' });
       const outline = h('input', { type: 'checkbox', testid: 'export-outline' });
-      btn = h('button', { class: 'btn primary big', testid: 'export-ruida' }, t('make_dxf'));
+      btn = h('button', { class: 'btn primary big block', testid: 'export-ruida' }, icon('export', 18), t('make_dxf'));
       btn.addEventListener('click', () => doExport(btn, { target: 'ruida', kerf_mm: numVal(kerf) ?? 0, include_sheet_outline: outline.checked }));
       ctrls = [field(t('kerf_mm'), kerf), h('div', { class: 'checks' }, h('label', { class: 'check' }, outline, t('sheet_outline')))];
       toolSel = null;
@@ -346,7 +361,7 @@ export async function render(root, { id }, isCurrent) {
       const tabW = h('input', { type: 'number', min: '0', step: '0.5', value: '6', testid: 'export-tab-width', inputmode: 'decimal' });
       const tabH = h('input', { type: 'number', min: '0', step: '0.1', value: '1.5', testid: 'export-tab-height', inputmode: 'decimal' });
       const climb = h('input', { type: 'checkbox', testid: 'export-climb', checked: true });
-      btn = h('button', { class: 'btn primary big', testid: 'export-ncstudio' }, t('make_gcode'));
+      btn = h('button', { class: 'btn primary big block', testid: 'export-ncstudio' }, icon('export', 18), t('make_gcode'));
       btn.addEventListener('click', () => {
         const body = { target: 'ncstudio', cut_tool_id: idNum(toolSel.value),
           cam: { cut_through_mm: numVal(through) ?? 0.3, tabs: tabs.checked, tab_width_mm: numVal(tabW) ?? 6,
@@ -360,7 +375,7 @@ export async function render(root, { id }, isCurrent) {
     }
     exportBody.replaceChildren(
       h('p', { class: 'muted', testid: 'export-kind' }, isLaser() ? t('export_laser', { m: machine().name ?? '' }) : t('export_cnc', { m: machine().name ?? '' })),
-      h('div', { class: 'grid-form' }, ctrls),
+      h('div', { class: 'grid-form two' }, ctrls),
       h('div', { class: 'row' }, btn));
     renderFiles();
   }
@@ -377,26 +392,83 @@ export async function render(root, { id }, isCurrent) {
     }, t('making'));
   }
 
-  const exportCard = h('section', { class: 'card' },
-    h('h2', {}, h('span', { class: 'step' }, '3'), t('export')),
+  const exportCard = panelSection({ title: t('export'), step: '3', testid: 'panel-export' },
     exportBody,
     h('h3', {}, t('files')), filesBox,
-    h('div', { class: 'row' }, zipLink, h('span', { class: 'grow' }), commitBtn));
+    h('div', { class: 'row wrap' }, zipLink, h('span', { class: 'grow' }), commitBtn));
+
+  // ---- canvas: the active sheet, or all parts laid out before nesting ----
+  const cv = canvasView({ testid: 'job-canvas' });
+  const canvasTitle = h('span', { class: 'canvas-title', testid: 'canvas-title' });
+  function renderCanvas() {
+    const nest = S.job.nest;
+    const parts = S.job.parts || [];
+    if (nest && Array.isArray(nest.sheets) && nest.sheets.length) {
+      const s = nest.sheets[S.active] || nest.sheets[0];
+      canvasTitle.textContent = `${t('sheet')} ${(s.index ?? S.active) + 1} / ${nest.sheets.length} · ${num(s.width)} × ${num(s.height)} mm · ${pct(s.utilisation)}`
+        + (s.offcut ? ` · ${t('leftover')} ${num(s.offcut.width)} × ${num(s.offcut.height)} mm` : '');
+      cv.set(svgBox(s.svg, 'svg-fit sheet-doc'));
+    } else if (parts.length) {
+      canvasTitle.textContent = t('parts_board', { n: parts.reduce((a, p) => a + (Number(p.qty) || 0), 0) });
+      cv.set(h('div', { class: 'parts-board' }, parts.map((p) => h('div', { class: 'part-tile' },
+        svgBox(p.svg, 'tile-svg'),
+        h('div', { class: 'tile-cap' }, h('span', { class: 'tile-name' }, p.name), h('span', { class: 'qty-pill' }, `× ${p.qty ?? 1}`)),
+        h('div', { class: 'muted small' }, `${num(p.width, 1)} × ${num(p.height, 1)} mm`)))));
+    } else {
+      canvasTitle.textContent = t('canvas_empty_title');
+      cv.set(h('label', { class: 'canvas-empty', for: 'file-input' }, icon('upload', 40),
+        h('strong', {}, t('canvas_empty')), h('span', { class: 'muted' }, t('file_types'))));
+    }
+  }
+  cv.el.addEventListener('dragover', (e) => { e.preventDefault(); cv.el.classList.add('over'); });
+  cv.el.addEventListener('dragleave', () => cv.el.classList.remove('over'));
+  cv.el.addEventListener('drop', (e) => { e.preventDefault(); cv.el.classList.remove('over'); upload([...e.dataTransfer.files]); });
+
+  // ---- status bar: the numbers that matter at a glance ----
+  const statusBar = h('footer', { class: 'statusbar', testid: 'status-bar' });
+  function renderStatus() {
+    const nest = S.job.nest;
+    const parts = S.job.parts || [];
+    const copies = parts.reduce((a, p) => a + (Number(p.qty) || 0), 0);
+    const items = [
+      [t('parts'), `${parts.length} · ${t('copies_n', { n: copies })}`],
+      [t('machine'), `${machine().name ?? ''}`],
+      [t('material'), material().name ?? ''],
+    ];
+    if (nest && Array.isArray(nest.sheets)) {
+      const un = (nest.unplaced || []).reduce((a, u) => a + (Number(u.count) || 0), 0);
+      items.push([t('sheets_used'), nest.sheets_used ?? nest.sheets.length], [t('utilisation'), pct(nest.utilisation)]);
+      if (un) items.push([t('unplaced'), un, 'warn']);
+      const c = nest.cost || {};
+      if (Number(material().price_per_sheet)) items.push([t('cost'), `${money(c.total_thb)} THB ${t('excl_vat')}`]);
+      if (c.cut_minutes != null) items.push([t('cut'), t('minutes_n', { n: num(c.cut_minutes, 0) })]);
+    }
+    statusBar.replaceChildren(...items.map(([k, v, cls]) => h('span', { class: `sb-item ${cls || ''}` }, h('span', { class: 'sb-k' }, k), h('strong', {}, v))));
+  }
 
   // ---- delete job ----
-  const delJob = h('button', { class: 'btn danger-text', testid: 'job-delete' }, t('delete_job'));
+  const delJob = h('button', { class: 'tbtn danger-text', testid: 'job-delete', title: t('delete_job'), 'aria-label': t('delete_job') }, icon('trash', 18), h('span', { class: 'hide-sm' }, t('delete_job')));
   delJob.addEventListener('click', async () => {
     if (!(await confirmDialog(t('confirm_delete_job', { name: S.job.name }), { ok: t('delete'), danger: true }))) return;
     await busy(delJob, async () => { await api.del(`/jobs/${jid}`); location.hash = '#/jobs'; });
   });
 
-  fill(root, 
-    h('div', { class: 'row between wrap' },
-      h('div', {}, h('a', { href: '#/jobs', class: 'muted small' }, '← ', t('nav_jobs')),
-        h('h1', { testid: 'job-title' }, S.job.name ?? '', ' ', statusBadge)),
-      delJob),
-    h('div', { class: 'card grid-form' }, field(t('material'), matSel), field(t('machine'), macSel)),
-    partsCard, nestCard, exportCard);
+  const toolbar = h('header', { class: 'ws-toolbar' },
+    h('a', { href: '#/jobs', class: 'tbtn', title: t('back_jobs'), 'aria-label': t('back_jobs') }, icon('back', 18)),
+    h('h1', { testid: 'job-title' }, h('span', { class: 'title-text' }, S.job.name ?? ''), statusBadge),
+    h('div', { class: 'tb-fields' }, h('label', { class: 'tb-field' }, h('span', {}, t('material')), matSel),
+      h('label', { class: 'tb-field' }, h('span', {}, t('machine')), macSel)),
+    h('span', { class: 'grow' }),
+    delJob);
+
+  fill(root, h('div', { class: 'ws' },
+    toolbar,
+    h('section', { class: 'ws-center' },
+      h('div', { class: 'canvas-bar' }, canvasTitle, h('span', { class: 'grow' }), cv.controls),
+      cv.el,
+      strip),
+    h('aside', { class: 'panel', testid: 'panel' }, partsCard, nestCard, exportCard),
+    statusBar));
 
   updateStatus();
   renderExport(); // creates toolSel first so the gap default can use it

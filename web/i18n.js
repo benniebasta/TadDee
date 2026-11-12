@@ -57,6 +57,13 @@ const en = {
   plunge_mm_min: 'Plunge (mm/min)', rpm: 'Spindle (rpm)', thickness_mm: 'Thickness (mm)', sheet_mm: 'Sheet (mm)', margin_mm: 'Edge margin (mm)',
   price_per_sheet: 'Price per sheet (THB, excl. VAT)', price_hint: '0 = not set yet', set_price_short: 'set price',
   edit_x: 'Edit {name}', confirm_delete: 'Delete “{name}”?', err_required: '{f} is required.', err_number: '{f} must be a number.',
+  // workspace (makeover)
+  theme_light: 'Light workspace', theme_dark: 'Dark workspace', click_show: 'Show this sheet',
+  parts_board: 'All parts · {n} copies to cut', canvas_empty_title: 'No parts yet',
+  canvas_empty: 'Drop SVG or DXF files here, or click to choose', copies_n: '{n} copies', cut: 'Cutting',
+  relief_canvas_empty_title: 'No picture yet', relief_canvas_empty: 'Choose a picture to carve (PNG or JPG)',
+  relief_regions_empty: 'Make the relief first; each colour of the picture then gets its own shape here.',
+  relief_status_empty: 'Choose a picture, set the size, press Make relief', picture_and_size: 'Picture and size',
 };
 
 const th = {
@@ -107,6 +114,13 @@ const th = {
   plunge_mm_min: 'ความเร็วกดลง (มม./นาที)', rpm: 'รอบสปินเดิล (rpm)', thickness_mm: 'ความหนา (มม.)', sheet_mm: 'แผ่น (มม.)', margin_mm: 'ระยะขอบ (มม.)',
   price_per_sheet: 'ราคาต่อแผ่น (บาท ไม่รวม VAT)', price_hint: '0 = ยังไม่ได้ตั้งราคา', set_price_short: 'ตั้งราคา',
   edit_x: 'แก้ไข {name}', confirm_delete: 'ลบ “{name}” ใช่ไหม', err_required: 'กรุณากรอก{f}', err_number: '{f}ต้องเป็นตัวเลข',
+  // workspace (makeover)
+  theme_light: 'พื้นที่ทำงานสีสว่าง', theme_dark: 'พื้นที่ทำงานสีเข้ม', click_show: 'แสดงแผ่นนี้',
+  parts_board: 'ชิ้นงานทั้งหมด · ต้องตัด {n} ชิ้น', canvas_empty_title: 'ยังไม่มีชิ้นงาน',
+  canvas_empty: 'ลากไฟล์ SVG หรือ DXF มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์', copies_n: '{n} ชิ้น', cut: 'เวลาตัด',
+  relief_canvas_empty_title: 'ยังไม่มีรูป', relief_canvas_empty: 'เลือกรูปที่จะแกะนูน (PNG หรือ JPG)',
+  relief_regions_empty: 'กดสร้างงานนูนก่อน แล้วแต่ละสีในรูปจะมีรูปทรงของตัวเองที่นี่',
+  relief_status_empty: 'เลือกรูป ตั้งขนาด แล้วกดสร้างงานนูน', picture_and_size: 'รูปและขนาด',
 };
 
 const DICTS = { en, th };

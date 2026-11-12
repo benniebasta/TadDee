@@ -167,3 +167,109 @@ export function fill(el, ...kids) {
   el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
   return el;
 }
+
+// ---- icons -------------------------------------------------------------------
+// Our own simple line icons (24x24, stroke = currentColor).
+const ICONS = {
+  jobs: 'M4 7h16M4 12h16M4 17h10',
+  relief: 'M3 19l6-9 4 5 3-4 5 8z',
+  offcuts: 'M4 4h10v6h6v10H4z',
+  settings: 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1',
+  upload: 'M12 16V4M7 9l5-5 5 5M4 20h16',
+  nest: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
+  export: 'M12 4v12M7 11l5 5 5-5M4 20h16',
+  parts: 'M12 3l8 4.5v9L12 21l-8-4.5v-9z',
+  zoomin: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-5-5M11 8v6M8 11h6',
+  zoomout: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-5-5M8 11h6',
+  fit: 'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5',
+  trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
+  back: 'M15 5l-7 7 7 7',
+  sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5',
+  moon: 'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z',
+  chevron: 'M6 9l6 6 6-6',
+  plus: 'M12 5v14M5 12h14',
+  check: 'M5 12l5 5 9-10',
+  image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01',
+  file: 'M6 3h8l4 4v14H6zM14 3v4h4',
+};
+export function icon(name, size = 20) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', size); svg.setAttribute('height', size);
+  svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('ico');
+  const p = document.createElementNS(ns, 'path');
+  p.setAttribute('d', ICONS[name] || ICONS.file);
+  svg.append(p);
+  return svg;
+}
+
+// Collapsible section of the right-hand properties panel (open by default).
+export function panelSection({ title, iconName, step, open = true, testid }, ...body) {
+  const d = h('details', { class: 'psec', open, testid },
+    h('summary', {}, step ? h('span', { class: 'step' }, step) : iconName ? icon(iconName, 18) : null,
+      h('span', { class: 'psec-title' }, title), h('span', { class: 'grow' }), icon('chevron', 16)),
+    h('div', { class: 'psec-body' }, body));
+  return d;
+}
+
+// Work canvas with wheel zoom (around the pointer), drag to pan and fit.
+export function canvasView({ testid = 'canvas' } = {}) {
+  const stage = h('div', { class: 'stage' });
+  const el = h('div', { class: 'canvas', testid, tabindex: '0' }, stage);
+  let z = 1, x = 0, y = 0;
+  const apply = () => { stage.style.transform = `translate(${x}px, ${y}px) scale(${z})`; zoomLabel.textContent = `${Math.round(z * 100)} %`; };
+  const zoomLabel = h('span', { class: 'zoom-label', testid: 'zoom-label' }, '100 %');
+  const zoomAt = (nz, cx, cy) => {
+    nz = Math.min(20, Math.max(0.2, nz));
+    x = cx - (cx - x) * (nz / z); y = cy - (cy - y) * (nz / z); z = nz; apply();
+  };
+  const center = () => { const r = el.getBoundingClientRect(); return [r.width / 2, r.height / 2]; };
+  el.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = el.getBoundingClientRect();
+    zoomAt(z * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+  let drag = null;
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button,a,input,select')) return;
+    drag = { sx: e.clientX - x, sy: e.clientY - y, id: e.pointerId, moved: false };
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const nx = e.clientX - drag.sx, ny = e.clientY - drag.sy;
+    if (!drag.moved && Math.hypot(nx - x, ny - y) < 3) return;
+    if (!drag.moved) { drag.moved = true; el.setPointerCapture(drag.id); el.classList.add('panning'); }
+    x = nx; y = ny; apply();
+  });
+  const end = () => { drag = null; el.classList.remove('panning'); };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('keydown', (e) => {
+    if (e.key === '+' || e.key === '=') zoomAt(z * 1.25, ...center());
+    else if (e.key === '-') zoomAt(z / 1.25, ...center());
+    else if (e.key === '0') fit();
+  });
+  const fit = () => { z = 1; x = 0; y = 0; apply(); };
+  const controls = h('div', { class: 'zoom-ctrls' },
+    h('button', { class: 'tbtn', title: 'Zoom out (-)', 'aria-label': 'Zoom out', testid: 'zoom-out', onclick: () => zoomAt(z / 1.25, ...center()) }, icon('zoomout', 18)),
+    zoomLabel,
+    h('button', { class: 'tbtn', title: 'Zoom in (+)', 'aria-label': 'Zoom in', testid: 'zoom-in', onclick: () => zoomAt(z * 1.25, ...center()) }, icon('zoomin', 18)),
+    h('button', { class: 'tbtn', title: 'Fit (0)', 'aria-label': 'Fit', testid: 'zoom-fit', onclick: fit }, icon('fit', 18)));
+  return {
+    el, controls,
+    set(...kids) { fill(stage, ...kids); fit(); },
+    fit,
+  };
+}
+
+// Theme: light by default, optional dark workspace. Stored in localStorage.
+const THEME_KEY = 'nest.theme';
+export function getTheme() { try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'; } catch { return 'light'; } }
+export function applyTheme(th = getTheme()) {
+  document.documentElement.dataset.theme = th;
+  try { localStorage.setItem(THEME_KEY, th); } catch { /* private mode */ }
+}

@@ -1,7 +1,7 @@
 // Relief page (#/relief): picture -> 3D relief G-code (rough + finish), editable styles.
 import { api, url } from '../api.js';
 import { t } from '../i18n.js';
-import { h, fill, field, select, busy, toast, num, numVal } from '../ui.js';
+import { h, fill, field, select, busy, toast, num, numVal, icon, panelSection, canvasView } from '../ui.js';
 
 const PROFILES = ['dome', 'flat', 'bevel', 'engrave', 'background'];
 
@@ -33,8 +33,20 @@ export async function render(root, _params, isCurrent) {
   const height = h('input', { type: 'number', min: '0.5', step: '0.5', value: '6', testid: 'relief-height', inputmode: 'decimal' });
   const rough = select({ testid: 'relief-rough' }, roughOpts, roughOpts.find((o) => o.value === '6flat') ? '6flat' : roughOpts[0].value);
   const finish = select({ testid: 'relief-finish' }, finishOpts, finishOpts.find((o) => o.value === '3ball') ? '3ball' : finishOpts[0].value);
-  const runBtn = h('button', { class: 'btn primary big', testid: 'relief-run' }, t('make_relief'));
-  const result = h('div', { class: 'relief-result' });
+  const runBtn = h('button', { class: 'btn primary big block', testid: 'relief-run' }, icon('relief', 18), t('make_relief'));
+  const regionsBox = h('div', { class: 'relief-regions-box' });
+  const filesBox = h('div', {});
+  const cv = canvasView({ testid: 'relief-canvas' });
+  const canvasTitle = h('span', { class: 'canvas-title' }, t('relief_canvas_empty_title'));
+  const statusBar = h('footer', { class: 'statusbar', testid: 'status-bar' });
+  // show the picked picture on the canvas straight away
+  image.addEventListener('change', () => {
+    const f = image.files?.[0];
+    if (!f) return;
+    const src = URL.createObjectURL(f);
+    canvasTitle.textContent = f.name;
+    cv.set(h('img', { class: 'canvas-img', src, alt: f.name }));
+  });
 
   const params = () => ({
     width_mm: numVal(width), material_mm: numVal(material), max_height_mm: numVal(height),
@@ -57,7 +69,14 @@ export async function render(root, _params, isCurrent) {
   let rows = [];
   function renderResult() {
     const r = S.result;
-    if (!r) { result.replaceChildren(); return; }
+    if (!r) {
+      regionsBox.replaceChildren(h('p', { class: 'muted' }, t('relief_regions_empty')));
+      filesBox.replaceChildren(h('p', { class: 'muted' }, t('no_files')));
+      cv.set(h('label', { class: 'canvas-empty', for: 'relief-image-input' }, icon('image', 40),
+        h('strong', {}, t('relief_canvas_empty')), h('span', { class: 'muted' }, t('picture_hint'))));
+      statusBar.replaceChildren(h('span', { class: 'sb-item' }, h('span', { class: 'sb-k' }, t('nav_relief')), h('strong', {}, t('relief_status_empty'))));
+      return;
+    }
     const bust = `?v=${Date.now()}`;
     const imgUrls = imageUrls(r);
     const preview = imgUrls.find((u) => /preview/i.test(u)) || imgUrls[0];
@@ -93,38 +112,44 @@ export async function render(root, _params, isCurrent) {
         f.deepest_z != null ? `Z ${num(f.deepest_z, 2)}` : null].filter(Boolean).join(' · '))));
     const extra = (r.images || []).map((name, i) => h('a', { class: 'small', href: imgUrls[i] || relUrl(r, name), download: name }, name));
 
-    fill(result, 
-      h('div', { class: 'summary' },
-        statBox(t('size'), `${num(r.width_mm, 1)} × ${num(r.height_mm, 1)} mm`),
-        statBox(t('depth'), `${num(r.depth_mm, 2)} mm`),
-        statBox(t('lost_detail'), `${num(r.lost_detail_mm, 2)} mm`),
-        statBox(t('total_time'), t('minutes_n', { n: num(r.total_minutes, 1) }))),
-      preview ? h('img', { class: 'relief-img', testid: 'relief-preview', src: preview + bust, alt: t('preview') }) : null,
-      h('h3', {}, t('regions')),
-      h('div', { class: 'table-wrap' }, h('table', { testid: 'relief-regions' },
-        h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, t('colour')), h('th', { class: 'num' }, t('area_cm2')),
+    canvasTitle.textContent = `${num(r.width_mm, 1)} × ${num(r.height_mm, 1)} mm · ${t('depth')} ${num(r.depth_mm, 2)} mm`;
+    cv.set(preview ? h('img', { class: 'canvas-img', testid: 'relief-preview', src: preview + bust, alt: t('preview') }) : null);
+    fill(regionsBox,
+      h('div', { class: 'table-wrap' }, h('table', { testid: 'relief-regions', class: 'compact' },
+        h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', { class: 'hide-sm' }, t('colour')), h('th', { class: 'num' }, t('area_cm2')),
           h('th', {}, t('profile')), h('th', {}, t('height_mm')), h('th', {}, t('round_mm')))),
         h('tbody', {}, rows.map((x) => x.tr)))),
-      h('div', { class: 'row' }, updBtn),
-      h('h3', {}, t('files')),
+      h('div', { class: 'row' }, updBtn));
+    fill(filesBox,
       h('div', { class: 'files', testid: 'relief-files' }, files,
         h('p', { class: 'muted', testid: 'relief-total' }, t('total_time'), ': ', t('minutes_n', { n: num(r.total_minutes, 1) }))),
       extra.length ? h('div', { class: 'row wrap small-gap' }, h('span', { class: 'muted small' }, t('images'), ':'), extra) : null);
+    statusBar.replaceChildren(...[
+      [t('size'), `${num(r.width_mm, 1)} × ${num(r.height_mm, 1)} mm`],
+      [t('depth'), `${num(r.depth_mm, 2)} mm`],
+      [t('lost_detail'), `${num(r.lost_detail_mm, 2)} mm`],
+      [t('total_time'), t('minutes_n', { n: num(r.total_minutes, 1) })],
+    ].map(([k, v]) => h('span', { class: 'sb-item' }, h('span', { class: 'sb-k' }, k), h('strong', {}, v))));
   }
 
-  root.replaceChildren(
-    h('h1', {}, t('nav_relief')),
-    h('p', { class: 'muted' }, t('relief_intro')),
-    h('section', { class: 'card' },
-      h('div', { class: 'grid-form' },
+  image.id = 'relief-image-input';
+  fill(root, h('div', { class: 'ws' },
+    h('header', { class: 'ws-toolbar' }, h('h1', {}, icon('relief', 20), t('nav_relief')),
+      h('span', { class: 'muted small hide-sm' }, t('relief_intro'))),
+    h('section', { class: 'ws-center' },
+      h('div', { class: 'canvas-bar' }, canvasTitle, h('span', { class: 'grow' }), cv.controls),
+      cv.el),
+    h('aside', { class: 'panel', testid: 'panel' },
+      panelSection({ title: t('picture_and_size'), step: '1' },
         field(t('picture'), image, t('picture_hint')),
-        field(t('width_mm'), width),
-        field(t('material_mm'), material),
-        field(t('max_height_mm'), height),
-        field(t('rough_bit'), rough),
-        field(t('finish_bit'), finish)),
-      h('div', { class: 'row' }, runBtn)),
-    h('section', { class: 'card' }, result));
+        h('div', { class: 'grid-form two' },
+          field(t('width_mm'), width), field(t('material_mm'), material),
+          field(t('max_height_mm'), height), h('span'),
+          field(t('rough_bit'), rough), field(t('finish_bit'), finish)),
+        h('div', { class: 'row' }, runBtn)),
+      panelSection({ title: t('regions'), step: '2' }, regionsBox),
+      panelSection({ title: t('files'), step: '3' }, filesBox)),
+    statusBar));
   renderResult();
 }
 

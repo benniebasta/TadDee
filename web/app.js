@@ -1,6 +1,6 @@
 // App shell: top bar, hash router, language switch.
 import { t, getLang, setLang, onLangChange } from './i18n.js';
-import { h } from './ui.js';
+import { h, icon, getTheme, applyTheme } from './ui.js';
 import * as jobs from './views/jobs.js';
 import * as job from './views/job.js';
 import * as relief from './views/relief.js';
@@ -8,10 +8,10 @@ import * as offcuts from './views/offcuts.js';
 import * as settings from './views/settings.js';
 
 const NAV = [
-  { href: '#/jobs', key: 'nav_jobs', match: /^jobs/ },
-  { href: '#/relief', key: 'nav_relief', match: /^relief/ },
-  { href: '#/offcuts', key: 'nav_offcuts', match: /^offcuts/ },
-  { href: '#/settings', key: 'nav_settings', match: /^settings/ },
+  { href: '#/jobs', key: 'nav_jobs', icon: 'jobs', match: /^jobs/ },
+  { href: '#/relief', key: 'nav_relief', icon: 'relief', match: /^relief/ },
+  { href: '#/offcuts', key: 'nav_offcuts', icon: 'offcuts', match: /^offcuts/ },
+  { href: '#/settings', key: 'nav_settings', icon: 'settings', match: /^settings/ },
 ];
 
 // Route table: pattern -> view module.
@@ -26,36 +26,46 @@ function resolve(hash) {
   return { view: jobs, params: {}, path: 'jobs' };
 }
 
-function renderTopbar() {
-  const bar = document.getElementById('topbar');
+// Left tool rail (bottom bar on phones): brand, sections, language, theme.
+function renderRail() {
+  const bar = document.getElementById('rail');
   const path = location.hash.replace(/^#\/?/, '') || 'jobs';
   const langSel = h('select', { class: 'lang', testid: 'lang-switch', 'aria-label': t('language'),
     onchange: (e) => setLang(e.target.value) },
-  h('option', { value: 'en' }, 'English'), h('option', { value: 'th' }, 'ไทย'));
+  h('option', { value: 'en' }, 'EN'), h('option', { value: 'th' }, 'ไทย'));
   langSel.value = getLang();
+  const dark = getTheme() === 'dark';
+  const themeBtn = h('button', { class: 'rail-btn', testid: 'theme-switch', title: t(dark ? 'theme_light' : 'theme_dark'),
+    'aria-label': t(dark ? 'theme_light' : 'theme_dark'),
+    onclick: () => { applyTheme(getTheme() === 'dark' ? 'light' : 'dark'); renderRail(); } }, icon(dark ? 'sun' : 'moon', 18));
   bar.replaceChildren(
-    h('a', { class: 'brand', href: '#/jobs' }, 'Nest'),
-    h('nav', { class: 'nav' }, NAV.map((n) =>
-      h('a', { href: n.href, class: n.match.test(path) ? 'active' : '', testid: `nav-${n.key.slice(4)}` }, t(n.key)))),
-    langSel,
+    h('a', { class: 'rail-brand', href: '#/jobs', title: 'Nest' }, h('span', { class: 'logo' }, 'N')),
+    ...NAV.map((n) => h('a', { href: n.href, class: `rail-item${n.match.test(path) ? ' active' : ''}`,
+      testid: `nav-${n.key.slice(4)}`, 'aria-current': n.match.test(path) ? 'page' : null },
+    icon(n.icon, 22), h('span', {}, t(n.key)))),
+    h('div', { class: 'rail-foot' }, langSel, themeBtn),
   );
 }
 
 let cleanup = null;
 let renderSeq = 0;
 async function route() {
-  renderTopbar();
+  renderRail();
   document.documentElement.lang = getLang();
-  const { view, params } = resolve(location.hash);
+  const { view, params, path } = resolve(location.hash);
   if (typeof cleanup === 'function') { try { cleanup(); } catch { /* ignore */ } }
   cleanup = null;
   const root = document.getElementById('view');
+  // job and relief pages are full-screen workspaces; the rest are scrolling pages
+  root.classList.toggle('ws-mode', view === job || view === relief);
+  root.scrollTop = 0;
   const seq = ++renderSeq;
   root.replaceChildren(h('p', { class: 'muted' }, t('loading')));
   const c = await view.render(root, params, () => seq === renderSeq);
   if (seq === renderSeq) cleanup = c;
 }
 
+applyTheme();
 window.addEventListener('hashchange', route);
 onLangChange(route);
 if (!location.hash) location.replace('#/jobs');
