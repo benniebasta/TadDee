@@ -366,3 +366,8 @@ ENUT's design tools (die-cut stickers, LED layout, letter pricing, plaques, QR, 
 
 ## Needed from Bennie
 1. Name of a new empty GitHub repo. 2. Yes to install on TANINP. 3. Five real job files and the usual sheet sizes and materials. 4. Bit list on the router and the exact laser software name. 5. Who will use it (names for logins). 6. A half-day slot at the factory for the P1 tests.
+
+## Part 2 status (2026-11-13)
+Built and merged: P2 items 2.1-2.10 and P3 items 3.1-3.6. Tests: 173 Python, 13 simulator parser, 20/20 browser steps.
+Still open in P2/P3: feeds library has no editor screen (API only); check issues are listed, not drawn on the canvas; tasks run one at a time per kind, not per machine; Cancel discards the run (no "keep best so far"); 0.25 mm grid only on small sheets. First guesses to confirm in P1: ramp 12 mm at max 10°, spoil board limit 1 mm, small part 50 mm.
+Next: P1 on the real machines, then P4 (logins) and P5 (Windows service, CI, manual).

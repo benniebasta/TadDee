@@ -208,7 +208,11 @@ await step('switch job to laser and export Ruida DXF', async () => {
   await page.reload();
   // wait for the re-nest itself: the old preview is still on screen, and the old
   // layout (bigger than the laser bed) is refused by the export checks
-  const nested = page.waitForResponse((r) => r.url().endsWith('/nest') && r.request().method() === 'POST', { timeout: 60000 });
+  // nesting runs as a background task: wait until the task reports done
+  const nested = page.waitForResponse(async (r) => {
+    if (!/\/api\/tasks\/\d+$/.test(new URL(r.url()).pathname) || r.request().method() !== 'GET') return false;
+    try { return (await r.json()).status === 'done'; } catch { return false; }
+  }, { timeout: 60000 });
   await tid(page, 'nest-run').click();
   await nested;
   await tid(page, 'sheet-preview').first().waitFor({ timeout: 60000 });
