@@ -50,14 +50,16 @@ export function toast(message, type = 'error') {
 }
 export const toastError = (e) => toast(errorText(e), 'error');
 
-// Error text in the chosen language. The server writes English sentences plus
-// a code; Thai shows the Thai text of the code (with the detail for input errors).
+// Error text in the chosen language. The server answers in the language the
+// request asked for (X-Lang); a sentence it could not translate falls back to
+// the Thai text of the error code (plus the detail for input errors).
 const DETAIL_CODES = new Set(['bad_input', 'not_found', 'conflict', 'too_large', 'backup_failed']);
 export function errorText(e) {
   const msg = e?.message || String(e ?? '');
   const code = e?.code;
   if (!code || !hasKey(`err_${code}`)) return msg;
   if (getLang() === 'en') return msg || t(`err_${code}`);
+  if (/[\u0E00-\u0E7F]/.test(msg)) return msg + (e.requestId && code === 'server_error' ? ` (${e.requestId})` : '');
   if (DETAIL_CODES.has(code)) return msg ? `${t(`err_${code}`)}: ${msg}` : t(`err_${code}`);
   return t(`err_${code}`) + (e.requestId && code === 'server_error' ? ` (${e.requestId})` : '');
 }
@@ -275,10 +277,10 @@ export function canvasView({ testid = 'canvas' } = {}) {
   });
   const fit = () => { z = 1; x = 0; y = 0; apply(); };
   const controls = h('div', { class: 'zoom-ctrls' },
-    h('button', { class: 'tbtn', title: 'Zoom out (-)', 'aria-label': 'Zoom out', testid: 'zoom-out', onclick: () => zoomAt(z / 1.25, ...center()) }, icon('zoomout', 18)),
+    h('button', { class: 'tbtn', title: `${t('zoom_out')} (-)`, 'aria-label': t('zoom_out'), testid: 'zoom-out', onclick: () => zoomAt(z / 1.25, ...center()) }, icon('zoomout', 18)),
     zoomLabel,
-    h('button', { class: 'tbtn', title: 'Zoom in (+)', 'aria-label': 'Zoom in', testid: 'zoom-in', onclick: () => zoomAt(z * 1.25, ...center()) }, icon('zoomin', 18)),
-    h('button', { class: 'tbtn', title: 'Fit (0)', 'aria-label': 'Fit', testid: 'zoom-fit', onclick: fit }, icon('fit', 18)));
+    h('button', { class: 'tbtn', title: `${t('zoom_in')} (+)`, 'aria-label': t('zoom_in'), testid: 'zoom-in', onclick: () => zoomAt(z * 1.25, ...center()) }, icon('zoomin', 18)),
+    h('button', { class: 'tbtn', title: `${t('zoom_fit')} (0)`, 'aria-label': t('zoom_fit'), testid: 'zoom-fit', onclick: fit }, icon('fit', 18)));
   return {
     el, controls,
     set(...kids) { fill(stage, ...kids); fit(); },

@@ -1,5 +1,7 @@
 // Thin fetch wrapper for the Nest API. JSON in/out; errors throw Error(detail)
 // with .code (server error code, e.g. job_locked), .status and .requestId.
+import { getLang } from './i18n.js';
+
 const BASE = '/api';
 
 // Turn any error body into one plain sentence.
@@ -15,7 +17,7 @@ function detailOf(body, status) {
 }
 
 async function request(method, path, { json, form } = {}) {
-  const opts = { method, headers: { Accept: 'application/json' } };
+  const opts = { method, headers: { Accept: 'application/json', 'X-Lang': getLang() } };   // server answers in this language
   if (json !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(json);

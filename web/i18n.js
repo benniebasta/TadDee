@@ -115,6 +115,7 @@ const en = {
   err_bad_input: 'Check the input', err_not_found: 'Not found', err_conflict: 'Not possible right now',
   err_too_large: 'File too large', err_job_locked: 'This job is marked as cut and locked. Unlock it first to change it.',
   err_task_busy: 'This is still running. Wait for it to finish.', err_server_error: 'Something went wrong on the server. The details are in the log.',
+  zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_fit: 'Fit to screen',
   err_network: 'Cannot reach the Nest server. Check the network.', err_backup_failed: 'Backup failed',
   // production nest options (Part 2)
   rot_none: 'none (as drawn)', rot_30: 'every 30°', rot_free: 'free (every 10°)',
@@ -245,6 +246,7 @@ const th = {
   err_bad_input: 'ข้อมูลไม่ถูกต้อง', err_not_found: 'ไม่พบข้อมูล', err_conflict: 'ทำไม่ได้ในตอนนี้',
   err_too_large: 'ไฟล์ใหญ่เกินไป', err_job_locked: 'งานนี้ตัดแล้วและถูกล็อก ต้องปลดล็อกก่อนจึงจะแก้ไขได้',
   err_task_busy: 'งานนี้ยังทำอยู่ รอให้เสร็จก่อน', err_server_error: 'เซิร์ฟเวอร์เกิดข้อผิดพลาด รายละเอียดอยู่ในไฟล์ log',
+  zoom_in: 'ขยาย', zoom_out: 'ย่อ', zoom_fit: 'พอดีจอ',
   err_network: 'ติดต่อเซิร์ฟเวอร์ Nest ไม่ได้ ตรวจสอบเครือข่าย', err_backup_failed: 'สำรองข้อมูลไม่สำเร็จ',
   // production nest options (Part 2)
   rot_none: 'ไม่หมุน (ตามแบบ)', rot_30: 'ทุก 30°', rot_free: 'อิสระ (ทุก 10°)',

@@ -24,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import backup as backup_mod
+from . import i18n
 from . import services as sv
 from .db import Database, default_data_dir, get_database, session_scope
 from .logs import new_request_id, request_id, setup_logging
@@ -561,6 +562,24 @@ def _media_type(name: str) -> str:
             ".zip": "application/zip"}.get(ext, "application/octet-stream")
 
 
+async def _translated(response) -> Response:
+    """Re-write a JSON reply with its user-facing sentences in Thai."""
+    body = b""
+    if hasattr(response, "body_iterator"):
+        async for chunk in response.body_iterator:
+            body += chunk if isinstance(chunk, bytes) else chunk.encode()
+    else:
+        body = response.body
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in ("content-length",)}
+    try:
+        import json as _json
+        data = i18n.translate_json(_json.loads(body))
+        body = _json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except ValueError:
+        pass
+    return Response(body, status_code=response.status_code, headers=headers, media_type="application/json")
+
+
 def _first_error(e: Exception) -> str:
     errs = getattr(e, "errors", None)
     if callable(errs):
@@ -653,6 +672,8 @@ def create_app(data_dir: str | None = None, web_dir: str | None = None, backup_d
     async def request_context(request: Request, call_next):
         rid = (request.headers.get("x-request-id") or "")[:40] or new_request_id()
         token = request_id.set(rid)
+        want = (request.headers.get("x-lang") or "en").lower()[:2]
+        lang_token = i18n.lang.set("th" if want == "th" else "en")
         t0 = time.perf_counter()
         try:
             try:
@@ -661,6 +682,9 @@ def create_app(data_dir: str | None = None, web_dir: str | None = None, backup_d
                 log.exception("unhandled error on %s %s", request.method, request.url.path)
                 response = error_json(500, "Something went wrong on the server. The details are in the log "
                                            f"(request {rid}).", "server_error")
+            if (i18n.lang.get() == "th" and request.url.path.startswith("/api/")
+                    and response.headers.get("content-type", "").startswith("application/json")):
+                response = await _translated(response)
             response.headers["X-Request-ID"] = rid
             path = request.url.path
             if path.startswith("/api/"):
@@ -671,6 +695,7 @@ def create_app(data_dir: str | None = None, web_dir: str | None = None, backup_d
             return response
         finally:
             request_id.reset(token)
+            i18n.lang.reset(lang_token)
 
     @app.exception_handler(sv.UserError)
     async def user_error(request: Request, exc: sv.UserError):
