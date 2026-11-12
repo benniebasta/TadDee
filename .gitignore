@@ -4,3 +4,4 @@ data/
 node_modules/
 e2e/results/
 *.pyc
+backups/

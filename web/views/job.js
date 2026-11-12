@@ -4,6 +4,7 @@ import { t } from '../i18n.js';
 import { h, fill, field, select, busy, toast, toastError, confirmDialog, svgBox,
   num, money, pct, idOf, numVal, icon, panelSection, canvasView } from '../ui.js';
 import { idNum } from './jobs.js';
+import { taskBar, follow, taskError } from '../task.js';
 
 // Nest option tables (values are stable for tests; labels are translated).
 const ROTATIONS = [
@@ -21,7 +22,7 @@ function range(a, b, s) { const r = []; for (let x = a; x < b; x += s) r.push(x)
 const countOf = (v) => (Array.isArray(v) ? v.length : Number(v) || 0);
 
 export async function render(root, { id }, isCurrent) {
-  const S = { job: null, materials: [], machines: [], tools: [], warnings: [], gapTouched: false, active: 0 };
+  const S = { job: null, materials: [], machines: [], tools: [], warnings: [], gapTouched: false, active: 0, nestTask: null };
   try {
     [S.job, S.materials, S.machines, S.tools] = await Promise.all([
       api.get(`/jobs/${encodeURIComponent(id)}`), api.get('/materials'), api.get('/machines'), api.get('/tools')]);
@@ -46,6 +47,8 @@ export async function render(root, { id }, isCurrent) {
     return { ...(full || {}), ...(m && typeof m === 'object' ? m : {}) };
   };
   const isLaser = () => machine().kind === 'laser';
+  const locked = () => S.job.status === 'cut' || !!S.job.locked;
+  const alive = () => root.isConnected && isCurrent();
   const reloadJob = async () => { S.job = await api.get(`/jobs/${jid}`); return S.job; };
 
   // ---- header: name, status, material + machine (editable via PATCH) ----
@@ -53,6 +56,7 @@ export async function render(root, { id }, isCurrent) {
   const updateStatus = () => {
     statusBadge.className = `badge status-${S.job.status}`;
     statusBadge.textContent = t(`status_${S.job.status}`, {}, S.job.status ?? '');
+    renderLock();
   };
   const matSel = select({ testid: 'job-edit-material' },
     S.materials.map((m) => ({ value: m.id, label: m.name })), material().id);
@@ -157,7 +161,8 @@ export async function render(root, { id }, isCurrent) {
         testid: 'part-qty', class: 'qty', inputmode: 'numeric', 'aria-label': t('qty') });
       qty.addEventListener('input', () => qtyChanged(p, qty));
       qty.addEventListener('change', () => qtyChanged(p, qty));
-      const del = h('button', { class: 'btn icon danger-text', testid: 'part-delete', title: t('delete'), 'aria-label': t('delete') }, '✕');
+      const del = h('button', { class: 'btn icon danger-text', testid: 'part-delete', title: t('delete'), 'aria-label': t('delete'), disabled: locked() }, '✕');
+      qty.disabled = locked();
       del.addEventListener('click', () => busy(del, async () => {
         await api.del(`/jobs/${jid}/parts/${encodeURIComponent(p.id)}`);
         S.job.parts = (S.job.parts || []).filter((x) => x.id !== p.id);
@@ -194,10 +199,11 @@ export async function render(root, { id }, isCurrent) {
 
   const gapIn = h('input', { type: 'number', min: '0', step: '0.5', testid: 'nest-gap', inputmode: 'decimal' });
   gapIn.addEventListener('input', () => { S.gapTouched = true; });
-  const rotMatch = S.job.nest && Array.isArray(st.rotations)
+  const saved = !!(S.job.nest || S.job.settings_saved);   // settings from a nest or a duplicated job
+  const rotMatch = saved && Array.isArray(st.rotations)
     ? ROTATIONS.find((r) => r.angles.length === st.rotations.length && r.angles.every((a, i) => Number(st.rotations[i]) === a)) : null;
   const rotSel = select({ testid: 'nest-rotations' }, ROTATIONS.map((r) => ({ value: r.value, label: t(r.key) })), rotMatch?.value ?? '0/90/180/270');
-  const qMatch = S.job.nest && QUALITY.find((q) => q.resolution_mm === Number(st.resolution_mm));
+  const qMatch = saved && QUALITY.find((q) => q.resolution_mm === Number(st.resolution_mm));
   const qualSel = select({ testid: 'nest-quality' }, QUALITY.map((q) => ({ value: q.value, label: t(q.key) })), qMatch?.value ?? 'normal');
   const holesChk = h('input', { type: 'checkbox', testid: 'nest-holes', checked: st.allow_in_holes ?? true });
   const offcutChk = h('input', { type: 'checkbox', testid: 'nest-offcuts', checked: st.use_offcuts ?? false });
@@ -205,6 +211,7 @@ export async function render(root, { id }, isCurrent) {
   const sheetH = h('input', { type: 'number', min: '1', step: '1', testid: 'nest-sheet-h', inputmode: 'decimal' });
   const nestBtn = h('button', { class: 'btn primary big block', testid: 'nest-run' }, icon('nest', 18), t('nest'));
   const nestResult = h('div', { class: 'nest-result' });
+  const nestBar = taskBar('nest-progress', 'nest-cancel');
 
   const setSheetPlaceholders = () => {
     const m = material();
@@ -212,24 +219,51 @@ export async function render(root, { id }, isCurrent) {
     sheetH.placeholder = m.sheet_h ? String(m.sheet_h) : '';
   };
   // settings holds defaults before the first nest; only reuse them once the job was nested
-  if (st.gap_mm != null && S.job.nest) { gapIn.value = st.gap_mm; S.gapTouched = true; }
+  if (st.gap_mm != null && saved) { gapIn.value = st.gap_mm; S.gapTouched = true; }
+
+  // Nesting runs as a background task: progress + Cancel in the panel; the
+  // result shows in the same summary/previews when it is done.
+  async function followNest(task) {
+    S.nestTask = task;
+    syncExportButtons();
+    let fin;
+    try {
+      fin = await follow(task, nestBar, alive);
+    } finally {
+      S.nestTask = null;
+      nestBar.hide();
+    }
+    if (!fin || !alive()) return;
+    if (fin.status === 'done') {
+      try { await reloadJob(); } catch { /* keep old job */ }
+      if (!S.job.exports) S.job.exports = [];
+      updateStatus();
+      renderNestResult();
+      renderExport();
+      return;
+    }
+    syncExportButtons();
+    if (fin.status === 'cancelled') { toast(t('nest_cancelled'), 'ok'); return; }
+    throw taskError(fin);
+  }
 
   nestBtn.addEventListener('click', () => busy(nestBtn, async () => {
-    await flushQty();
-    const q = QUALITY.find((x) => x.value === qualSel.value) || QUALITY[1];
-    const r = ROTATIONS.find((x) => x.value === rotSel.value) || ROTATIONS[1];
-    const body = { gap_mm: numVal(gapIn) ?? defaultGap(), rotations: r.angles, allow_in_holes: holesChk.checked,
-      resolution_mm: q.resolution_mm, time_limit_s: q.time_limit_s, use_offcuts: offcutChk.checked };
-    const w = numVal(sheetW), hh = numVal(sheetH);
-    if (w) body.sheet_w = w;
-    if (hh) body.sheet_h = hh;
-    const res = await api.post(`/jobs/${jid}/nest`, body);
-    try { await reloadJob(); } catch { /* keep old job */ }
-    if (res && Array.isArray(res.sheets)) S.job.nest = res;
-    if (!S.job.exports) S.job.exports = [];
-    updateStatus();
-    renderNestResult();
-    renderExport();
+    S.nestTask = { pending: true };   // export and Mark as cut wait from this moment on
+    syncExportButtons();
+    try {
+      await flushQty();
+      const q = QUALITY.find((x) => x.value === qualSel.value) || QUALITY[1];
+      const r = ROTATIONS.find((x) => x.value === rotSel.value) || ROTATIONS[1];
+      const body = { gap_mm: numVal(gapIn) ?? defaultGap(), rotations: r.angles, allow_in_holes: holesChk.checked,
+        resolution_mm: q.resolution_mm, time_limit_s: q.time_limit_s, use_offcuts: offcutChk.checked };
+      const w = numVal(sheetW), hh = numVal(sheetH);
+      if (w) body.sheet_w = w;
+      if (hh) body.sheet_h = hh;
+      const task = await api.post(`/jobs/${jid}/nest?async=1`, body);
+      await followNest(task);
+    } finally {
+      if (S.nestTask?.pending) { S.nestTask = null; syncExportButtons(); }
+    }
   }, t('nesting')));
 
   function costLine(nest) {
@@ -309,10 +343,17 @@ export async function render(root, { id }, isCurrent) {
       h('label', { class: 'check' }, holesChk, t('parts_in_holes')),
       h('label', { class: 'check' }, offcutChk, t('use_offcuts'))),
     h('div', { class: 'row' }, nestBtn),
+    nestBar.el,
     nestResult);
 
   // ---- 3. Export ----
   let toolSel = null;
+  let exportBtn = null;
+  // no files (and no Mark as cut) from a layout that is being replaced or a locked job
+  function syncExportButtons() {
+    if (exportBtn && !exportBtn.classList.contains('busy')) exportBtn.disabled = locked() || !!S.nestTask;
+    commitBtn.disabled = !S.job.nest || S.job.status === 'cut' || !!S.nestTask;
+  }
   const exportBody = h('div');
   const filesBox = h('div', { class: 'files', testid: 'export-files' });
   const zipLink = h('a', { class: 'btn', testid: 'export-zip', href: url(`/jobs/${jid}/export.zip`), download: '' }, t('download_zip'));
@@ -324,6 +365,7 @@ export async function render(root, { id }, isCurrent) {
       await api.post(`/jobs/${jid}/commit`, {});
       await reloadJob();
       updateStatus();
+      renderParts();
       renderExport();
       toast(t('marked_cut'), 'ok');
     });
@@ -337,7 +379,7 @@ export async function render(root, { id }, isCurrent) {
         f.size != null ? `${num(f.size / 1024, 1)} KB` : null].filter(Boolean).join(' · '))))
       : [h('p', { class: 'muted' }, t('no_files'))]));
     zipLink.classList.toggle('hidden', !files.length);
-    commitBtn.disabled = !S.job.nest || S.job.status === 'cut';
+    syncExportButtons();
     commitBtn.textContent = S.job.status === 'cut' ? t('already_cut') : t('mark_cut');
   }
 
@@ -373,6 +415,7 @@ export async function render(root, { id }, isCurrent) {
         field(t('tab_width'), tabW), field(t('tab_height'), tabH),
         h('div', { class: 'checks' }, h('label', { class: 'check' }, tabs, t('tabs')), h('label', { class: 'check' }, climb, t('climb')))];
     }
+    exportBtn = btn;
     exportBody.replaceChildren(
       h('p', { class: 'muted', testid: 'export-kind' }, isLaser() ? t('export_laser', { m: machine().name ?? '' }) : t('export_cnc', { m: machine().name ?? '' })),
       h('div', { class: 'grid-form two' }, ctrls),
@@ -446,11 +489,46 @@ export async function render(root, { id }, isCurrent) {
     statusBar.replaceChildren(...items.map(([k, v, cls]) => h('span', { class: `sb-item ${cls || ''}` }, h('span', { class: 'sb-k' }, k), h('strong', {}, v))));
   }
 
+  // ---- lock after "Mark as cut" ----
+  const lockBox = h('div', { class: 'lock-banner hidden', testid: 'job-locked', role: 'status' });
+  const unlockBtn = h('button', { class: 'btn', testid: 'job-unlock' }, t('unlock'));
+  unlockBtn.addEventListener('click', async () => {
+    if (!(await confirmDialog(t('confirm_unlock'), { ok: t('unlock') }))) return;
+    await busy(unlockBtn, async () => {
+      await api.post(`/jobs/${jid}/unlock`, {});
+      await reloadJob();
+      updateStatus();
+      renderParts();
+      renderNestResult();
+      renderExport();
+      toast(t('unlocked'), 'ok');
+    });
+  });
+  function renderLock() {
+    const on = locked();
+    lockBox.classList.toggle('hidden', !on);
+    lockBox.replaceChildren(icon('lock', 18), h('span', { class: 'grow' }, t('job_locked_note')), unlockBtn);
+    fileInput.disabled = on;
+    drop.classList.toggle('disabled', on);
+    nestBtn.disabled = on || nestBtn.classList.contains('busy');
+    matSel.disabled = on;
+    macSel.disabled = on;
+  }
+
+  // ---- duplicate job ----
+  const dupJob = h('button', { class: 'tbtn', testid: 'job-duplicate', title: t('duplicate'), 'aria-label': t('duplicate') },
+    icon('copy', 18), h('span', { class: 'hide-sm' }, t('duplicate')));
+  dupJob.addEventListener('click', () => busy(dupJob, async () => {
+    const j = await api.post(`/jobs/${jid}/duplicate`, {});
+    toast(t('duplicated', { name: j.name }), 'ok');
+    location.hash = `#/jobs/${encodeURIComponent(j.id)}`;
+  }, ' '));
+
   // ---- delete job ----
   const delJob = h('button', { class: 'tbtn danger-text', testid: 'job-delete', title: t('delete_job'), 'aria-label': t('delete_job') }, icon('trash', 18), h('span', { class: 'hide-sm' }, t('delete_job')));
   delJob.addEventListener('click', async () => {
     if (!(await confirmDialog(t('confirm_delete_job', { name: S.job.name }), { ok: t('delete'), danger: true }))) return;
-    await busy(delJob, async () => { await api.del(`/jobs/${jid}`); location.hash = '#/jobs'; });
+    await busy(delJob, async () => { await api.del(`/jobs/${jid}`); toast(t('moved_to_bin'), 'ok'); location.hash = '#/jobs'; });
   });
 
   const toolbar = h('header', { class: 'ws-toolbar' },
@@ -459,6 +537,7 @@ export async function render(root, { id }, isCurrent) {
     h('div', { class: 'tb-fields' }, h('label', { class: 'tb-field' }, h('span', {}, t('material')), matSel),
       h('label', { class: 'tb-field' }, h('span', {}, t('machine')), macSel)),
     h('span', { class: 'grow' }),
+    dupJob,
     delJob);
 
   fill(root, h('div', { class: 'ws' },
@@ -467,7 +546,7 @@ export async function render(root, { id }, isCurrent) {
       h('div', { class: 'canvas-bar' }, canvasTitle, h('span', { class: 'grow' }), cv.controls),
       cv.el,
       strip),
-    h('aside', { class: 'panel', testid: 'panel' }, partsCard, nestCard, exportCard),
+    h('aside', { class: 'panel', testid: 'panel' }, lockBox, partsCard, nestCard, exportCard),
     statusBar));
 
   updateStatus();
@@ -475,6 +554,11 @@ export async function render(root, { id }, isCurrent) {
   if (!S.gapTouched) gapIn.value = defaultGap();
   renderParts();
   renderNestResult();
+
+  // a nest still running (page reloaded, or started on another device): show it and its result
+  api.get(`/tasks?job_id=${jid}&kind=nest&active=1`).then((list) => {
+    if (Array.isArray(list) && list.length && alive() && !S.nestTask) busy(nestBtn, () => followNest(list[0]), t('nesting'));
+  }).catch(() => { /* older server: no tasks */ });
 
   return () => { flushQty(); }; // save pending qty edits when leaving the page
 }

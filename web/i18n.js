@@ -11,7 +11,7 @@ const en = {
   material: 'Material', machine: 'Machine', status: 'Status', sheets: 'Sheets', utilisation: 'Utilisation', created: 'Created',
   no_jobs: 'No jobs yet. Press “New job” to start.', err_job_name: 'Type a job name.', back_jobs: 'Back to jobs',
   status_draft: 'Draft', status_nested: 'Nested', status_exported: 'Exported', status_cut: 'Cut',
-  delete_job: 'Delete job', confirm_delete_job: 'Delete job “{name}” and all its files?',
+  delete_job: 'Delete job', confirm_delete_job: 'Move job “{name}” to the bin? You can restore it for 30 days.',
   // parts
   parts: 'Parts', choose_files: 'Choose files', drop_files: 'or drop SVG / DXF files here', file_types: 'SVG or DXF, up to 20 MB each',
   uploading: 'Uploading…', imported_n: '{n} parts imported', import_warnings: 'Import notes', no_parts: 'No parts yet. Add an SVG or DXF file.',
@@ -64,6 +64,26 @@ const en = {
   relief_canvas_empty_title: 'No picture yet', relief_canvas_empty: 'Choose a picture to carve (PNG or JPG)',
   relief_regions_empty: 'Make the relief first; each colour of the picture then gets its own shape here.',
   relief_status_empty: 'Choose a picture, set the size, press Make relief', picture_and_size: 'Picture and size',
+  // platform: tasks, lock, duplicate, bin, backup, health, errors
+  task_queued: 'Waiting in the queue…', task_running: 'Working… {p} %', cancel_task: 'Cancel', cancelling: 'Cancelling…',
+  nest_cancelled: 'Nest cancelled', relief_cancelled: 'Relief cancelled', nest_done: 'Nest finished',
+  job_locked_note: 'Marked as cut: this job is locked. Parts, nest and files cannot change.',
+  unlock: 'Unlock', unlocked: 'Job unlocked',
+  confirm_unlock: 'Unlock this job? The offcuts it saved leave the library and the offcuts it used come back, so it can be changed and cut again.',
+  duplicate: 'Duplicate', duplicated: 'Copy made: {name}', moved_to_bin: 'Moved to the bin',
+  bin: 'Bin', active_jobs: 'Jobs', restore: 'Restore', restored: 'Restored', delete_forever: 'Delete for good',
+  confirm_purge: 'Delete “{name}” and all its files for good? This cannot be undone.',
+  deleted_on: 'Deleted', purge_on: 'Gone for good on', bin_empty: 'The bin is empty.',
+  bin_note: 'Deleted jobs stay here for 30 days, then they are deleted for good.',
+  system: 'System', health: 'Health', backup: 'Backup', backup_now: 'Back up now', backing_up: 'Backing up…',
+  backup_last: 'Last backup', backup_never: 'Never', backup_done: 'Backup saved: {path}', backup_folder: 'Backup folder',
+  backup_note: 'Runs every night at 23:30 (Task Scheduler) and keeps the newest 14.',
+  version: 'Version', uptime: 'Running for', uptime_hm: '{h} h {m} min', disk_free: 'Free disk', db_status: 'Database',
+  status_ok: 'OK', status_problem: 'Problem', queued_tasks: 'Tasks waiting',
+  err_bad_input: 'Check the input', err_not_found: 'Not found', err_conflict: 'Not possible right now',
+  err_too_large: 'File too large', err_job_locked: 'This job is marked as cut and locked. Unlock it first to change it.',
+  err_task_busy: 'This is still running. Wait for it to finish.', err_server_error: 'Something went wrong on the server. The details are in the log.',
+  err_network: 'Cannot reach the Nest server. Check the network.', err_backup_failed: 'Backup failed',
 };
 
 const th = {
@@ -74,7 +94,7 @@ const th = {
   material: 'วัสดุ', machine: 'เครื่อง', status: 'สถานะ', sheets: 'จำนวนแผ่น', utilisation: 'การใช้พื้นที่', created: 'สร้างเมื่อ',
   no_jobs: 'ยังไม่มีงาน กด “งานใหม่” เพื่อเริ่ม', err_job_name: 'กรุณาพิมพ์ชื่องาน', back_jobs: 'กลับไปหน้างาน',
   status_draft: 'ร่าง', status_nested: 'วางแล้ว', status_exported: 'ส่งออกแล้ว', status_cut: 'ตัดแล้ว',
-  delete_job: 'ลบงาน', confirm_delete_job: 'ลบงาน “{name}” และไฟล์ทั้งหมดใช่ไหม',
+  delete_job: 'ลบงาน', confirm_delete_job: 'ย้ายงาน “{name}” ไปถังขยะ? กู้คืนได้ภายใน 30 วัน',
   parts: 'ชิ้นงาน', choose_files: 'เลือกไฟล์', drop_files: 'หรือลากไฟล์ SVG / DXF มาวางที่นี่', file_types: 'SVG หรือ DXF ไม่เกินไฟล์ละ 20 MB',
   uploading: 'กำลังอัปโหลด…', imported_n: 'นำเข้า {n} ชิ้นแล้ว', import_warnings: 'หมายเหตุการนำเข้า', no_parts: 'ยังไม่มีชิ้นงาน เพิ่มไฟล์ SVG หรือ DXF',
   name: 'ชื่อ', size_mm: 'ขนาด (มม.)', holes: 'รู', qty: 'จำนวน', marks_n: 'เส้นมาร์ค {n} เส้น ({layer})', err_qty: 'จำนวนต้องอยู่ระหว่าง 0 ถึง 999',
@@ -121,6 +141,26 @@ const th = {
   relief_canvas_empty_title: 'ยังไม่มีรูป', relief_canvas_empty: 'เลือกรูปที่จะแกะนูน (PNG หรือ JPG)',
   relief_regions_empty: 'กดสร้างงานนูนก่อน แล้วแต่ละสีในรูปจะมีรูปทรงของตัวเองที่นี่',
   relief_status_empty: 'เลือกรูป ตั้งขนาด แล้วกดสร้างงานนูน', picture_and_size: 'รูปและขนาด',
+  // platform: tasks, lock, duplicate, bin, backup, health, errors
+  task_queued: 'รอคิว…', task_running: 'กำลังทำงาน… {p} %', cancel_task: 'ยกเลิก', cancelling: 'กำลังยกเลิก…',
+  nest_cancelled: 'ยกเลิกการจัดวางแล้ว', relief_cancelled: 'ยกเลิกงานนูนแล้ว', nest_done: 'จัดวางเสร็จแล้ว',
+  job_locked_note: 'งานนี้ตัดแล้วและถูกล็อก แก้ชิ้นงาน จัดวางใหม่ หรือสร้างไฟล์ใหม่ไม่ได้',
+  unlock: 'ปลดล็อก', unlocked: 'ปลดล็อกงานแล้ว',
+  confirm_unlock: 'ปลดล็อกงานนี้? เศษแผ่นที่งานนี้บันทึกไว้จะถูกเอาออก และเศษแผ่นที่ใช้ไปจะกลับมา เพื่อให้แก้ไขและตัดใหม่ได้',
+  duplicate: 'ทำสำเนา', duplicated: 'ทำสำเนาแล้ว: {name}', moved_to_bin: 'ย้ายไปถังขยะแล้ว',
+  bin: 'ถังขยะ', active_jobs: 'งาน', restore: 'กู้คืน', restored: 'กู้คืนแล้ว', delete_forever: 'ลบถาวร',
+  confirm_purge: 'ลบ “{name}” และไฟล์ทั้งหมดถาวร? ย้อนกลับไม่ได้',
+  deleted_on: 'ลบเมื่อ', purge_on: 'ลบถาวรวันที่', bin_empty: 'ถังขยะว่าง',
+  bin_note: 'งานที่ลบจะอยู่ที่นี่ 30 วัน แล้วจึงถูกลบถาวร',
+  system: 'ระบบ', health: 'สถานะระบบ', backup: 'สำรองข้อมูล', backup_now: 'สำรองข้อมูลตอนนี้', backing_up: 'กำลังสำรองข้อมูล…',
+  backup_last: 'สำรองล่าสุด', backup_never: 'ยังไม่เคย', backup_done: 'บันทึกไฟล์สำรองแล้ว: {path}', backup_folder: 'โฟลเดอร์สำรองข้อมูล',
+  backup_note: 'สำรองอัตโนมัติทุกคืนเวลา 23:30 (Task Scheduler) และเก็บไว้ 14 ชุดล่าสุด',
+  version: 'เวอร์ชัน', uptime: 'ทำงานมาแล้ว', uptime_hm: '{h} ชม. {m} นาที', disk_free: 'พื้นที่ดิสก์ว่าง', db_status: 'ฐานข้อมูล',
+  status_ok: 'ปกติ', status_problem: 'มีปัญหา', queued_tasks: 'งานที่รอคิว',
+  err_bad_input: 'ข้อมูลไม่ถูกต้อง', err_not_found: 'ไม่พบข้อมูล', err_conflict: 'ทำไม่ได้ในตอนนี้',
+  err_too_large: 'ไฟล์ใหญ่เกินไป', err_job_locked: 'งานนี้ตัดแล้วและถูกล็อก ต้องปลดล็อกก่อนจึงจะแก้ไขได้',
+  err_task_busy: 'งานนี้ยังทำอยู่ รอให้เสร็จก่อน', err_server_error: 'เซิร์ฟเวอร์เกิดข้อผิดพลาด รายละเอียดอยู่ในไฟล์ log',
+  err_network: 'ติดต่อเซิร์ฟเวอร์ Nest ไม่ได้ ตรวจสอบเครือข่าย', err_backup_failed: 'สำรองข้อมูลไม่สำเร็จ',
 };
 
 const DICTS = { en, th };
@@ -134,6 +174,7 @@ export function t(key, vars = {}, fallback) {
   return s;
 }
 export const getLang = () => lang;
+export const hasKey = (key) => key in DICTS[lang] || key in en;
 export function setLang(l) {
   if (!DICTS[l] || l === lang) return;
   lang = l;

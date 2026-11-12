@@ -385,3 +385,27 @@ table.compact th, table.compact td { padding: 0.35rem 0.4rem; font-size: 0.88rem
   .parts-board { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .toast { bottom: 80px; }
 }
+
+/* ---- platform: background task bar, lock banner, Jobs/Bin filter, system panel ---- */
+.task-bar { margin: 0.6rem 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--bg-soft); }
+.task-track { height: 8px; border-radius: 4px; background: var(--border-soft); overflow: hidden; }
+.task-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+.task-bar.queued .task-fill { width: 100% !important; opacity: .25; animation: task-pulse 1.2s ease-in-out infinite; }
+@keyframes task-pulse { 50% { opacity: .5; } }
+.task-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
+.task-text { font-size: 0.85rem; color: var(--muted); }
+.btn.small { min-height: 32px; padding: 0.2rem 0.7rem; font-size: 0.85rem; }
+.lock-banner { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.8rem; padding: 0.6rem 0.8rem; border: 1px solid var(--warn-border);
+  background: var(--warn-bg); border-radius: var(--radius); color: #7a5300; font-size: 0.9rem; }
+.dropzone.disabled { opacity: .5; pointer-events: none; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.seg-btn { min-height: var(--touch); padding: 0 0.9rem; border: 0; background: var(--bg); color: var(--text); font: inherit; cursor: pointer; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--border); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-weight: 600; }
+.ok-text { color: var(--ok); }
+.danger-text { color: var(--danger); }
+[data-theme=dark] .lock-banner { background: #3a2e10; color: #f0d48a; border-color: #6b5520; }
+[data-theme=dark] .seg-btn { background: var(--surface); }

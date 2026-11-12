@@ -1,4 +1,5 @@
-// Thin fetch wrapper for the Nest API. JSON in/out; errors throw Error(detail).
+// Thin fetch wrapper for the Nest API. JSON in/out; errors throw Error(detail)
+// with .code (server error code, e.g. job_locked), .status and .requestId.
 const BASE = '/api';
 
 // Turn any error body into one plain sentence.
@@ -25,7 +26,7 @@ async function request(method, path, { json, form } = {}) {
   try {
     res = await fetch(BASE + path, opts);
   } catch (e) {
-    throw new Error('Cannot reach the Nest server. Check the network.');
+    throw apiError('Cannot reach the Nest server. Check the network.', 'network', 0);
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -33,8 +34,20 @@ async function request(method, path, { json, form } = {}) {
   if (text) {
     try { body = JSON.parse(text); } catch { body = text; }
   }
-  if (!res.ok) throw new Error(detailOf(body, res.status));
+  if (!res.ok) {
+    const code = body && typeof body === 'object' ? body.code : undefined;
+    throw apiError(detailOf(body, res.status), code || (res.status >= 500 ? 'server_error' : undefined), res.status,
+      body && typeof body === 'object' ? body.request_id : undefined);
+  }
   return body;
+}
+
+export function apiError(message, code, status, requestId) {
+  const e = new Error(message);
+  e.code = code;
+  e.status = status;
+  e.requestId = requestId;
+  return e;
 }
 
 export const api = {

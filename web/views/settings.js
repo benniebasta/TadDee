@@ -1,7 +1,7 @@
-// Settings (#/settings): machines, tools, materials. One generic table editor per entity.
+// Settings (#/settings): machines, tools, materials (one generic table editor each), then System: health and backup.
 import { api } from '../api.js';
 import { t } from '../i18n.js';
-import { h, field, select, busy, toast, toastError, confirmDialog, num, money } from '../ui.js';
+import { h, field, select, busy, toast, toastError, confirmDialog, num, money, dateText, icon } from '../ui.js';
 
 // Field list per entity. `id` = testid suffix (e.g. tool-diameter).
 const ENTITIES = [
@@ -62,8 +62,45 @@ const ENTITIES = [
 export async function render(root, _params, isCurrent) {
   const sections = ENTITIES.map((e) => editor(e));
   if (!isCurrent()) return;
-  root.replaceChildren(h('h1', {}, t('nav_settings')), ...sections.map((s) => s.el));
-  await Promise.all(sections.map((s) => s.load()));
+  const sys = systemPanel();
+  root.replaceChildren(h('h1', {}, t('nav_settings')), ...sections.map((s) => s.el), sys.el);
+  await Promise.all([...sections.map((s) => s.load()), sys.load()]);
+}
+
+// System: health of the server and the backup ("Back up now", last backup time).
+function systemPanel() {
+  const info = h('dl', { class: 'kv', testid: 'health-info' });
+  const last = h('strong', { testid: 'backup-last' }, '…');
+  const folder = h('span', { class: 'muted small', testid: 'backup-folder' });
+  const btn = h('button', { class: 'btn primary', testid: 'backup-now' }, t('backup_now'));
+  const row = (k, v, cls) => [h('dt', {}, k), h('dd', { class: cls || '' }, v)];
+  async function load() {
+    try {
+      const [hl, b] = await Promise.all([api.get('/health'), api.get('/admin/backup')]);
+      const up = Math.max(0, Math.round(Number(hl.uptime_s) || 0) / 60);
+      info.replaceChildren(
+        ...row(t('db_status'), hl.db_ok ? t('status_ok') : t('status_problem'), hl.db_ok ? 'ok-text' : 'danger-text'),
+        ...row(t('version'), hl.version ?? ''),
+        ...row(t('uptime'), t('uptime_hm', { h: Math.floor(up / 60), m: Math.floor(up % 60) })),
+        ...row(t('disk_free'), hl.disk_free_mb != null ? `${num(hl.disk_free_mb / 1000, 1)} GB` : '?'),
+        ...row(t('queued_tasks'), String(hl.worker?.queued ?? 0)));
+      last.textContent = b.time ? dateText(b.time) : t('backup_never');
+      folder.textContent = b.folder ? `${t('backup_folder')}: ${b.folder}` : '';
+    } catch (e) { toastError(e); }
+  }
+  btn.addEventListener('click', () => busy(btn, async () => {
+    const b = await api.post('/admin/backup', {});
+    toast(t('backup_done', { path: b.path }), 'ok');
+    await load();
+  }, t('backing_up')));
+  const el = h('section', { class: 'card', testid: 'system-panel' },
+    h('h2', {}, icon('backup', 20), t('system')),
+    h('h3', {}, t('health')), info,
+    h('h3', {}, t('backup')),
+    h('div', { class: 'row wrap' }, h('span', {}, `${t('backup_last')}: `), last, h('span', { class: 'grow' }), btn),
+    folder ? h('p', {}, folder) : null,
+    h('p', { class: 'muted small' }, t('backup_note')));
+  return { el, load };
 }
 
 function editor(E) {

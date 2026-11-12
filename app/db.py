@@ -1,7 +1,7 @@
 """Database setup: one SQLite file per data folder (<DATA_DIR>/nest.db).
 
 The data folder is chosen by create_app(data_dir) or the NEST_DATA_DIR
-environment variable (default ./data). Back up the app by copying the folder.
+environment variable (default ./data). Back up with `python -m app.backup` (app/backup.py).
 """
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ class Database:
         self.SessionLocal = sessionmaker(self.engine, expire_on_commit=False)
 
     def create_all(self) -> None:
+        """Bring the schema up to date (Alembic migrations, app/migrate.py)."""
         from . import models  # noqa: F401  (registers the tables on Base)
-        Base.metadata.create_all(self.engine)
+        from .migrate import migrate
+        migrate(self.engine)
 
     def session(self) -> Session:
         return self.SessionLocal()

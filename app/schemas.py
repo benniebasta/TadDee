@@ -141,6 +141,8 @@ class JobListItem(BaseModel):
     sheets: int                   # sheets used by the latest nest, 0 before nesting
     utilisation: float | None     # 0..1 from the latest nest, None before nesting
     created_at: str
+    deleted_at: str | None = None   # set when the job is in the bin
+    purge_at: str | None = None     # when the bin deletes it for good
 
 
 class PartOut(BaseModel):
@@ -283,6 +285,9 @@ class JobDetail(BaseModel):
     created_at: str
     parts: list[PartOut]
     settings: NestSettingsOut
+    settings_saved: bool = False    # settings come from a nest (or a duplicated job), not defaults
+    locked: bool = False            # marked as cut: no part, nest or export changes
+    deleted_at: str | None = None
     nest: NestOut | None
     exports: list[FileOut]
 
@@ -334,3 +339,27 @@ class ReliefOut(BaseModel):
     image_urls: list[str]         # same order as images
     file_urls: list[str]          # same order as files
     params: dict                  # the ReliefParams used (styles included)
+
+
+# ---------- background tasks, backup, health ----------
+
+class TaskOut(BaseModel):
+    id: int
+    task_id: int
+    kind: str                     # nest | relief
+    job_id: int | None
+    ref: str | None               # relief run id
+    status: str                   # queued | running | done | failed | cancelled
+    progress: float               # 0..1
+    message: str
+    result: dict | None
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+
+
+class BackupOut(BaseModel):
+    time: str | None = None       # ISO time of the last backup, None = never
+    path: str | None = None
+    size: int | None = None
+    folder: str | None = None     # where backups go
